@@ -1,11 +1,15 @@
+import logging
 import os
 import tempfile
+import time
 from typing import Any, Dict, List, Optional
 
 from datasets import load_dataset
 from tokenizers import ByteLevelBPETokenizer
 from torch.utils.data import DataLoader, Dataset
 from transformers import DataCollatorForLanguageModeling, PreTrainedTokenizerFast
+
+logger = logging.getLogger(__name__)
 
 
 class PackedTextDataset(Dataset):
@@ -27,9 +31,15 @@ class PackedTextDataset(Dataset):
         bos_id = tokenizer.bos_token_id
         eos_id = tokenizer.eos_token_id
         
+        t0 = time.time()
+        total_texts = len(texts)
+        logger.info(f"Starting tokenization of {total_texts} documents...")
+        print(f"Starting tokenization of {total_texts} documents...")
+        
         # Tokenize and format each document as [BOS] + tokens + [EOS]
         all_token_ids = []
-        for text in texts:
+        processed_count = 0
+        for idx, text in enumerate(texts):
             if not text.strip():
                 continue
             tokens = tokenizer.encode(text, add_special_tokens=False)
@@ -40,8 +50,33 @@ class PackedTextDataset(Dataset):
             if eos_id is not None:
                 doc_ids.append(eos_id)
             all_token_ids.extend(doc_ids)
+            processed_count += 1
             
+            # Print/log progress periodically if dataset is large (e.g. >= 100 texts)
+            if total_texts >= 100 and ((idx + 1) % max(1, total_texts // 10) == 0 or (idx + 1) == total_texts):
+                elapsed = time.time() - t0
+                throughput = (idx + 1) / elapsed if elapsed > 0 else 0
+                progress_pct = ((idx + 1) / total_texts) * 100
+                msg = (
+                    f"Tokenization progress: {idx + 1}/{total_texts} documents "
+                    f"({progress_pct:.1f}%) | Speed: {throughput:.2f} docs/sec"
+                )
+                logger.info(msg)
+                print(msg)
+                
+        t_tokenize = time.time() - t0
+        msg = (
+            f"Tokenization completed in {t_tokenize:.2f} seconds. "
+            f"Processed {processed_count} non-empty documents. "
+            f"Total tokens: {len(all_token_ids)}"
+        )
+        logger.info(msg)
+        print(msg)
+        
         # Pack token ids into chunks using sliding window
+        logger.info("Packing tokens into fixed-length sequences...")
+        print("Packing tokens into fixed-length sequences...")
+        t_pack_start = time.time()
         self.chunks = []
         step = max(1, max_seq_len - stride)
         
@@ -51,8 +86,25 @@ class PackedTextDataset(Dataset):
             padded_ids = all_token_ids + [pad_id] * (max_seq_len - len(all_token_ids))
             self.chunks.append(padded_ids)
         else:
-            for i in range(0, len(all_token_ids) - max_seq_len + 1, step):
+            total_tokens = len(all_token_ids)
+            num_steps = (total_tokens - max_seq_len) // step + 1
+            log_interval = max(1, num_steps // 10)
+            for chunk_idx, i in enumerate(range(0, total_tokens - max_seq_len + 1, step)):
                 self.chunks.append(all_token_ids[i : i + max_seq_len])
+                if num_steps >= 1000 and ((chunk_idx + 1) % log_interval == 0 or (chunk_idx + 1) == num_steps):
+                    pack_pct = ((chunk_idx + 1) / num_steps) * 100
+                    msg = f"Packing progress: {chunk_idx + 1}/{num_steps} sequences packed ({pack_pct:.1f}%)"
+                    logger.info(msg)
+                    print(msg)
+                    
+        t_pack = time.time() - t_pack_start
+        msg = (
+            f"Packing completed in {t_pack:.2f} seconds. "
+            f"Generated {len(self.chunks)} sequences of length {max_seq_len} "
+            f"(stride={stride}, step={step})."
+        )
+        logger.info(msg)
+        print(msg)
                 
     def __len__(self) -> int:
         return len(self.chunks)
@@ -72,6 +124,9 @@ def train_custom_tokenizer(
     """
     Trains a custom ByteLevelBPETokenizer on provided texts and saves it as a HuggingFace PreTrainedTokenizerFast.
     """
+    logger.info(f"Training custom tokenizer on {len(texts)} texts, vocab_size={vocab_size}...")
+    print(f"Training custom tokenizer on {len(texts)} texts, vocab_size={vocab_size}...")
+    t0 = time.time()
     os.makedirs(save_dir, exist_ok=True)
     if special_tokens is None:
         special_tokens = ["<pad>", "<bos>", "<eos>", "<unk>"]
@@ -115,6 +170,9 @@ def train_custom_tokenizer(
         
         # Save the wrapped tokenizer configuration
         hf_tokenizer.save_pretrained(save_dir)
+        t_train = time.time() - t0
+        logger.info(f"Tokenizer training completed in {t_train:.2f} seconds. Saved to {save_dir}")
+        print(f"Tokenizer training completed in {t_train:.2f} seconds. Saved to {save_dir}")
         return hf_tokenizer
     finally:
         if os.path.exists(temp_file_path):
@@ -169,6 +227,12 @@ def get_dataloader(
     """
     Creates a PyTorch DataLoader utilizing DataCollatorForLanguageModeling.
     """
+    msg = (
+        f"Creating DataLoader: batch_size={batch_size}, shuffle={shuffle}, "
+        f"num_workers={num_workers}, pin_memory={pin_memory}"
+    )
+    logger.info(msg)
+    print(msg)
     collator = DataCollatorForLanguageModeling(
         tokenizer=dataset.tokenizer,
         mlm=False

@@ -1,6 +1,7 @@
 import logging
 import math
 import os
+import time
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -113,6 +114,7 @@ class Pretrainer:
         self.best_checkpoints = self.best_ppl_checkpoints
         self.best_loss_checkpoints: List[Dict[str, Any]] = []
         self.latest_train_loss: float = float("inf")
+        self.last_log_time = time.time()
 
     def train_epoch(self, epoch: int, global_step: int) -> int:
         """
@@ -181,12 +183,23 @@ class Pretrainer:
                 # Logging to console & TensorBoard
                 if global_step % self.log_interval == 0:
                     current_lr = self.optimizer.param_groups[0]["lr"]
-                    logger.info(
-                        f"Epoch {epoch} | Step {global_step} | Train Loss: {accum_loss:.4f} | LR: {current_lr:.6e}"
+                    elapsed = time.time() - self.last_log_time
+                    has_bs = self.train_dataloader and hasattr(self.train_dataloader, "batch_size")
+                    batch_size = self.train_dataloader.batch_size if has_bs else 1
+                    batches_processed = self.grad_accum_steps * self.log_interval
+                    seqs_processed = batches_processed * batch_size
+                    throughput = seqs_processed / elapsed if elapsed > 0 else 0
+                    msg = (
+                        f"Epoch {epoch} | Step {global_step} | Train Loss: {accum_loss:.4f} | "
+                        f"LR: {current_lr:.6e} | Speed: {throughput:.2f} seqs/sec "
+                        f"({elapsed:.2f}s elapsed)"
                     )
-                    print(f"Epoch {epoch} | Step {global_step} | Train Loss: {accum_loss:.4f} | LR: {current_lr:.6e}")
+                    logger.info(msg)
+                    print(msg)
                     self.writer.add_scalar("Loss/train", accum_loss, global_step)
                     self.writer.add_scalar("LR/train", current_lr, global_step)
+                    self.writer.add_scalar("Speed/train_seqs_per_sec", throughput, global_step)
+                    self.last_log_time = time.time()
                     
                 self.latest_train_loss = accum_loss
                 
@@ -211,10 +224,21 @@ class Pretrainer:
             logger.info("Validation dataloader not provided, skipping evaluation.")
             return float("inf")
             
+        logger.info("Starting validation loop...")
+        print("Starting validation loop...")
+        t_eval_start = time.time()
+        
         self.model.eval()
         total_loss = 0.0
         total_batches = 0
         
+        total_val_batches = len(self.val_dataloader) if hasattr(self.val_dataloader, "__len__") else None
+        if self.max_eval_batches is not None:
+            if total_val_batches is not None:
+                total_val_batches = min(total_val_batches, self.max_eval_batches)
+            else:
+                total_val_batches = self.max_eval_batches
+                
         with torch.no_grad():
             for batch_idx, batch in enumerate(self.val_dataloader):
                 if self.max_eval_batches is not None and batch_idx >= self.max_eval_batches:
@@ -227,11 +251,21 @@ class Pretrainer:
                 total_loss += outputs.loss.item()
                 total_batches += 1
                 
+                if total_val_batches is not None and total_val_batches >= 10:
+                    if (batch_idx + 1) % max(1, total_val_batches // 5) == 0 or (batch_idx + 1) == total_val_batches:
+                        logger.info(f"Eval progress: batch {batch_idx + 1}/{total_val_batches}")
+                        print(f"Eval progress: batch {batch_idx + 1}/{total_val_batches}")
+                
         avg_loss = total_loss / max(1, total_batches)
         perplexity = math.exp(avg_loss) if avg_loss < 20 else float("inf")
+        t_eval = time.time() - t_eval_start
         
-        logger.info(f"--- Eval Step {global_step} | Loss: {avg_loss:.4f} | Perplexity: {perplexity:.4f} ---")
-        print(f"--- Eval Step {global_step} | Loss: {avg_loss:.4f} | Perplexity: {perplexity:.4f} ---")
+        msg = (
+            f"--- Eval Step {global_step} | Loss: {avg_loss:.4f} | "
+            f"Perplexity: {perplexity:.4f} | Time: {t_eval:.2f}s ---"
+        )
+        logger.info(msg)
+        print(msg)
         
         # Test generation
         sample_prompt = "Le français est"
