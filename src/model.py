@@ -11,8 +11,10 @@ class FrenchGemmaModel(nn.Module):
     A custom PyTorch nn.Module wrapping the base Gemma 3 transformer architecture
     and adding a custom Linear LM Head mapped to the tokenizer vocabulary size.
     """
-    def __init__(self, model_id: str, vocab_size: int, config_override: dict = None):
+    def __init__(self, model_id: str, vocab_size: int, embedding_noise_std: float = 0.0, config_override: dict = None):
         super().__init__()
+        
+        self.embedding_noise_std = embedding_noise_std
         
         # Load blank config
         self.config = AutoConfig.from_pretrained(model_id)
@@ -50,17 +52,29 @@ class FrenchGemmaModel(nn.Module):
         
     def forward(
         self,
-        input_ids: torch.LongTensor,
+        input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         **kwargs
     ) -> CausalLMOutputWithPast:
         """
         Forward pass computing LM logits and cross-entropy loss if labels are provided.
         """
+        if input_ids is None and inputs_embeds is None:
+            raise ValueError("You must specify either input_ids or inputs_embeds")
+            
+        if inputs_embeds is None:
+            inputs_embeds = self.model.embed_tokens(input_ids)
+            
+        # Inject Gaussian embedding noise during training if configured
+        if self.training and self.embedding_noise_std > 0:
+            noise = torch.randn_like(inputs_embeds) * self.embedding_noise_std
+            inputs_embeds = inputs_embeds + noise
+            
         # Pass input through the base model
         outputs = self.model(
-            input_ids=input_ids,
+            inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             **kwargs
         )
