@@ -30,6 +30,7 @@ class TrainingConfig:
     vocab_size: Optional[int] = None
     output_dir: str = "./checkpoints"
     tb_log_dir: str = "./runs"
+    embedding_noise_std: float = 0.0
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "TrainingConfig":

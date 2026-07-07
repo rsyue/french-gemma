@@ -19,3 +19,4 @@ num_workers: 8
 prefetch_factor: 2
 freeze_schedule:
   0: []
+embedding_noise_std: 0.05
