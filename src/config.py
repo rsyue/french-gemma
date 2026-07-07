@@ -8,8 +8,8 @@ import yaml
 @dataclass
 class TrainingConfig:
     model_id: str = "google/gemma-3-270m-it"
-    dataset_path: str = "wikipedia"
-    dataset_name: str = "20220301.fr"
+    dataset_path: str = "wikimedia/wikipedia"
+    dataset_name: str = "20231101.fr"
     device: str = "cpu"
     max_sequence_length: int = 512
     batch_size: int = 2

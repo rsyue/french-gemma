@@ -121,8 +121,8 @@ def train_custom_tokenizer(
             os.remove(temp_file_path)
 
 def load_french_dataset(
-    dataset_path: str = "wikipedia",
-    dataset_name: str = "20220301.fr",
+    dataset_path: str = "wikimedia/wikipedia",
+    dataset_name: str = "20231101.fr",
     split: str = "train[:1000]",
     fallback_texts: Optional[List[str]] = None
 ) -> List[str]:
@@ -132,7 +132,7 @@ def load_french_dataset(
     """
     try:
         # Load the dataset
-        ds = load_dataset(dataset_path, dataset_name, split=split, trust_remote_code=True)
+        ds = load_dataset(dataset_path, dataset_name, split=split)
         # Extract text column
         if "text" in ds.column_names:
             return ds["text"]

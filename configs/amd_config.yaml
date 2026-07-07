@@ -1,6 +1,6 @@
 model_id: "google/gemma-3-270m-it"
-dataset_path: "wikipedia"
-dataset_name: "20220301.fr"
+dataset_path: "wikimedia/wikipedia"
+dataset_name: "20231101.fr"
 device: "cuda"
 max_sequence_length: 4096
 batch_size: 16
