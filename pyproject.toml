@@ -29,7 +29,7 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N"]
-ignore = []
+ignore = ["N803"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
