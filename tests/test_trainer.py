@@ -113,3 +113,61 @@ def test_best_checkpoint_rotation():
         assert len(chkpts_after) == 3
         assert not any("ppl-100.00" in name for name in chkpts_after)
         assert any("ppl-40.00" in name for name in chkpts_after)
+
+
+def test_trainer_max_eval_batches():
+    class MockModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(10, 10)
+            self.forward_calls = 0
+        def state_dict(self):
+            return {}
+        def forward(self, input_ids, attention_mask=None, labels=None):
+            self.forward_calls += 1
+            class Outputs:
+                loss = torch.tensor(1.0)
+                logits = torch.ones(1, 1, 10)
+            return Outputs()
+
+    class MockOptimizer:
+        def state_dict(self):
+            return {}
+
+    class MockTokenizer:
+        bos_token_id = 1
+        eos_token_id = 2
+        pad_token_id = 0
+        unk_token_id = 3
+        def encode(self, text, add_special_tokens=True):
+            return [1]
+        def decode(self, ids, skip_special_tokens=True):
+            return "Le français est"
+
+    mock_batch = {"input_ids": torch.ones(1, 5, dtype=torch.long)}
+    val_dataloader = [mock_batch] * 5
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        model = MockModel()
+        trainer = Pretrainer(
+            model=model,
+            tokenizer=MockTokenizer(),
+            train_dataloader=None,
+            val_dataloader=val_dataloader,
+            optimizer=MockOptimizer(),
+            lr_scheduler=None,
+            freeze_manager=None,
+            device="cpu",
+            amp_enabled=False,
+            output_dir=tmpdir,
+            tb_log_dir=os.path.join(tmpdir, "runs"),
+            max_eval_batches=2
+        )
+        
+        perplexity = trainer.evaluate(global_step=1)
+        assert perplexity is not None
+        # 2 eval batches + 20 generation steps in generate_text
+        assert model.forward_calls == 22
+
+
+

@@ -67,7 +67,8 @@ class Pretrainer:
         eval_interval: int = 500,
         save_interval: int = 1000,
         output_dir: str = "./checkpoints",
-        tb_log_dir: str = "./runs"
+        tb_log_dir: str = "./runs",
+        max_eval_batches: Optional[int] = 20
     ):
         self.model = model
         self.tokenizer = tokenizer
@@ -84,6 +85,7 @@ class Pretrainer:
         self.eval_interval = eval_interval
         self.save_interval = save_interval
         self.output_dir = output_dir
+        self.max_eval_batches = max_eval_batches
         
         # Setup AMP dtype
         if amp_dtype == "bfloat16":
@@ -207,7 +209,9 @@ class Pretrainer:
         total_batches = 0
         
         with torch.no_grad():
-            for batch in self.val_dataloader:
+            for batch_idx, batch in enumerate(self.val_dataloader):
+                if self.max_eval_batches is not None and batch_idx >= self.max_eval_batches:
+                    break
                 input_ids = batch["input_ids"].to(self.device)
                 attention_mask = batch["attention_mask"].to(self.device) if "attention_mask" in batch else None
                 labels = batch["labels"].to(self.device) if "labels" in batch else input_ids.clone()
