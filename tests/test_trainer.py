@@ -96,23 +96,69 @@ def test_best_checkpoint_rotation():
             tb_log_dir=os.path.join(tmpdir, "runs")
         )
         
-        # Save 4 checkpoints with decreasing perplexity (lower is better)
+        # Save 3 checkpoints with decreasing perplexity (lower is better)
         trainer.save_best_checkpoint(global_step=1, perplexity=100.0)
         trainer.save_best_checkpoint(global_step=2, perplexity=80.0)
-        trainer.save_best_checkpoint(global_step=3, perplexity=60.0)
+        
+        # We should have 2 checkpoints saved
+        chkpts = [f for f in os.listdir(tmpdir) if f.startswith("checkpoint-step-")]
+        assert len(chkpts) == 2
+        
+        # Save a 3rd one that is better (ppl=40)
+        trainer.save_best_checkpoint(global_step=3, perplexity=40.0)
+        
+        # Should still have only 2 checkpoints (the one with ppl=100.0 should be deleted)
+        chkpts_after = [f for f in os.listdir(tmpdir) if f.startswith("checkpoint-step-")]
+        assert len(chkpts_after) == 2
+        assert not any("ppl-100.00" in name for name in chkpts_after)
+        assert any("ppl-40.00" in name for name in chkpts_after)
+
+
+def test_best_loss_checkpoint_rotation():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        class MockModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = torch.nn.Linear(10, 10)
+            def state_dict(self):
+                return {"weights": torch.ones(10)}
+                
+        class MockOptimizer:
+            def state_dict(self):
+                return {}
+                
+        trainer = Pretrainer(
+            model=MockModel(),
+            tokenizer=None,
+            train_dataloader=None,
+            val_dataloader=None,
+            optimizer=MockOptimizer(),
+            lr_scheduler=None,
+            freeze_manager=None,
+            device="cpu",
+            amp_enabled=False,
+            output_dir=tmpdir,
+            tb_log_dir=os.path.join(tmpdir, "runs")
+        )
+        
+        # Save 4 checkpoints with decreasing training loss (lower is better)
+        trainer.save_best_loss_checkpoint(global_step=1, train_loss=1.5)
+        trainer.save_best_loss_checkpoint(global_step=2, train_loss=1.2)
+        trainer.save_best_loss_checkpoint(global_step=3, train_loss=0.9)
         
         # We should have 3 checkpoints saved
         chkpts = [f for f in os.listdir(tmpdir) if f.startswith("checkpoint-step-")]
         assert len(chkpts) == 3
         
-        # Save a 4th one that is better (ppl=40)
-        trainer.save_best_checkpoint(global_step=4, perplexity=40.0)
+        # Save a 4th one that is better (loss=0.5)
+        trainer.save_best_loss_checkpoint(global_step=4, train_loss=0.5)
         
-        # Should still have only 3 checkpoints (the one with ppl=100.0 should be deleted)
+        # Should still have only 3 checkpoints (the one with loss=1.5000 should be deleted)
         chkpts_after = [f for f in os.listdir(tmpdir) if f.startswith("checkpoint-step-")]
         assert len(chkpts_after) == 3
-        assert not any("ppl-100.00" in name for name in chkpts_after)
-        assert any("ppl-40.00" in name for name in chkpts_after)
+        assert not any("loss-1.5000" in name for name in chkpts_after)
+        assert any("loss-0.5000" in name for name in chkpts_after)
+
 
 
 def test_trainer_max_eval_batches():
@@ -168,6 +214,46 @@ def test_trainer_max_eval_batches():
         assert perplexity is not None
         # 2 eval batches + 20 generation steps in generate_text
         assert model.forward_calls == 22
+
+
+def test_periodic_checkpoint_rotation():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        class MockModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = torch.nn.Linear(10, 10)
+            def state_dict(self):
+                return {"weight": torch.ones(10)}
+
+        class MockOptimizer:
+            def state_dict(self):
+                return {}
+
+        trainer = Pretrainer(
+            model=MockModel(),
+            tokenizer=None,
+            train_dataloader=None,
+            val_dataloader=None,
+            optimizer=MockOptimizer(),
+            lr_scheduler=None,
+            freeze_manager=None,
+            device="cpu",
+            amp_enabled=False,
+            output_dir=tmpdir,
+            tb_log_dir=os.path.join(tmpdir, "runs"),
+            max_checkpoints=2
+        )
+
+        trainer.save_checkpoint(global_step=100)
+        trainer.save_checkpoint(global_step=200)
+        trainer.save_checkpoint(global_step=300)
+
+        chkpts = [f for f in os.listdir(tmpdir) if f.startswith("checkpoint-step-")]
+        assert len(chkpts) == 2
+        assert "checkpoint-step-100" not in chkpts
+        assert "checkpoint-step-200" in chkpts
+        assert "checkpoint-step-300" in chkpts
+
 
 
 

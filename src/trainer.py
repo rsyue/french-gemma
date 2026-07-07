@@ -68,7 +68,8 @@ class Pretrainer:
         save_interval: int = 1000,
         output_dir: str = "./checkpoints",
         tb_log_dir: str = "./runs",
-        max_eval_batches: Optional[int] = 20
+        max_eval_batches: Optional[int] = 20,
+        max_checkpoints: int = 5
     ):
         self.model = model
         self.tokenizer = tokenizer
@@ -86,6 +87,8 @@ class Pretrainer:
         self.save_interval = save_interval
         self.output_dir = output_dir
         self.max_eval_batches = max_eval_batches
+        self.max_checkpoints = max_checkpoints
+        self.periodic_checkpoints: List[str] = []
         
         # Setup AMP dtype
         if amp_dtype == "bfloat16":
@@ -105,9 +108,11 @@ class Pretrainer:
         # Tensorboard writer
         self.writer = SummaryWriter(log_dir=tb_log_dir)
         os.makedirs(self.output_dir, exist_ok=True)
-        
-        # Top 3 checkpoints: list of dicts {"path": str, "perplexity": float}
-        self.best_checkpoints: List[Dict[str, Any]] = []
+        # Top perplexity and training loss checkpoints
+        self.best_ppl_checkpoints: List[Dict[str, Any]] = []
+        self.best_checkpoints = self.best_ppl_checkpoints
+        self.best_loss_checkpoints: List[Dict[str, Any]] = []
+        self.latest_train_loss: float = float("inf")
 
     def train_epoch(self, epoch: int, global_step: int) -> int:
         """
@@ -183,6 +188,8 @@ class Pretrainer:
                     self.writer.add_scalar("Loss/train", accum_loss, global_step)
                     self.writer.add_scalar("LR/train", current_lr, global_step)
                     
+                self.latest_train_loss = accum_loss
+                
                 # Periodic Evaluation
                 if global_step % self.eval_interval == 0:
                     self.evaluate(global_step)
@@ -238,27 +245,26 @@ class Pretrainer:
         self.writer.add_text("Generation/val", generated, global_step)
         
         # Manage best checkpoints
-        self.save_best_checkpoint(global_step, perplexity)
+        self.save_best_perplexity_checkpoint(global_step, perplexity)
+        if self.latest_train_loss != float("inf"):
+            self.save_best_loss_checkpoint(global_step, self.latest_train_loss)
         
         return perplexity
 
-    def save_best_checkpoint(self, global_step: int, perplexity: float):
+    def save_best_perplexity_checkpoint(self, global_step: int, perplexity: float):
         """
-        Saves a checkpoint and retains only the 3 best checkpoints based on perplexity.
+        Saves a checkpoint and retains only the 2 best checkpoints based on perplexity.
         """
         checkpoint_name = f"checkpoint-step-{global_step}-ppl-{perplexity:.2f}"
         checkpoint_path = os.path.join(self.output_dir, checkpoint_name)
         
-        # If we have less than 3, or the current is better than the worst in our list
         should_save = False
-        if len(self.best_checkpoints) < 3:
+        if len(self.best_ppl_checkpoints) < 2:
             should_save = True
         else:
-            # Find the worst (highest perplexity) in our list
-            worst = max(self.best_checkpoints, key=lambda x: x["perplexity"])
+            worst = max(self.best_ppl_checkpoints, key=lambda x: x["perplexity"])
             if perplexity < worst["perplexity"]:
                 should_save = True
-                # Remove worst checkpoint file and entry
                 worst_path = worst["path"]
                 if os.path.exists(worst_path):
                     try:
@@ -267,10 +273,11 @@ class Pretrainer:
                             shutil.rmtree(worst_path)
                         else:
                             os.remove(worst_path)
-                        logger.info(f"Removed worst checkpoint file: {worst_path}")
+                        logger.info(f"Removed worst perplexity checkpoint file: {worst_path}")
+                        print(f"Removed worst perplexity checkpoint file: {worst_path}")
                     except Exception as e:
                         logger.warning(f"Failed to delete checkpoint {worst_path}: {e}")
-                self.best_checkpoints.remove(worst)
+                self.best_ppl_checkpoints.remove(worst)
                 
         if should_save:
             torch.save({
@@ -279,9 +286,60 @@ class Pretrainer:
                 "optimizer_state_dict": self.optimizer.state_dict(),
                 "perplexity": perplexity
             }, checkpoint_path)
-            self.best_checkpoints.append({"path": checkpoint_path, "perplexity": perplexity})
-            logger.info(f"Saved new best checkpoint: {checkpoint_path}")
-            print(f"Saved new best checkpoint: {checkpoint_path}")
+            self.best_ppl_checkpoints.append({"path": checkpoint_path, "perplexity": perplexity})
+            logger.info(f"Saved new best perplexity checkpoint: {checkpoint_path}")
+            print(f"Saved new best perplexity checkpoint: {checkpoint_path}")
+        else:
+            logger.info(f"No improvement in perplexity (current: {perplexity:.4f}). Leaving checkpoints in place.")
+            print(f"No improvement in perplexity (current: {perplexity:.4f}). Leaving checkpoints in place.")
+
+    def save_best_loss_checkpoint(self, global_step: int, train_loss: float):
+        """
+        Saves a checkpoint and retains only the 3 best checkpoints based on training loss.
+        """
+        checkpoint_name = f"checkpoint-step-{global_step}-loss-{train_loss:.4f}"
+        checkpoint_path = os.path.join(self.output_dir, checkpoint_name)
+        
+        should_save = False
+        if len(self.best_loss_checkpoints) < 3:
+            should_save = True
+        else:
+            worst = max(self.best_loss_checkpoints, key=lambda x: x["loss"])
+            if train_loss < worst["loss"]:
+                should_save = True
+                worst_path = worst["path"]
+                if os.path.exists(worst_path):
+                    try:
+                        import shutil
+                        if os.path.isdir(worst_path):
+                            shutil.rmtree(worst_path)
+                        else:
+                            os.remove(worst_path)
+                        logger.info(f"Removed worst training loss checkpoint file: {worst_path}")
+                        print(f"Removed worst training loss checkpoint file: {worst_path}")
+                    except Exception as e:
+                        logger.warning(f"Failed to delete checkpoint {worst_path}: {e}")
+                self.best_loss_checkpoints.remove(worst)
+                
+        if should_save:
+            torch.save({
+                "global_step": global_step,
+                "model_state_dict": self.model.state_dict(),
+                "optimizer_state_dict": self.optimizer.state_dict(),
+                "loss": train_loss
+            }, checkpoint_path)
+            self.best_loss_checkpoints.append({"path": checkpoint_path, "loss": train_loss})
+            logger.info(f"Saved new best training loss checkpoint: {checkpoint_path}")
+            print(f"Saved new best training loss checkpoint: {checkpoint_path}")
+        else:
+            logger.info(f"No improvement in training loss (current: {train_loss:.4f}). Leaving checkpoints in place.")
+            print(f"No improvement in training loss (current: {train_loss:.4f}). Leaving checkpoints in place.")
+
+    def save_best_checkpoint(self, global_step: int, perplexity: float):
+        """
+        Saves a checkpoint and retains only the 2 best checkpoints based on perplexity (backward compatible).
+        """
+        self.save_best_perplexity_checkpoint(global_step, perplexity)
 
     def save_checkpoint(self, global_step: int, perplexity: float = float("inf")):
         """
@@ -297,3 +355,18 @@ class Pretrainer:
         }, checkpoint_path)
         logger.info(f"Saved periodic checkpoint: {checkpoint_path}")
         print(f"Saved periodic checkpoint: {checkpoint_path}")
+        
+        self.periodic_checkpoints.append(checkpoint_path)
+        if len(self.periodic_checkpoints) > self.max_checkpoints:
+            oldest_path = self.periodic_checkpoints.pop(0)
+            if os.path.exists(oldest_path):
+                try:
+                    import shutil
+                    if os.path.isdir(oldest_path):
+                        shutil.rmtree(oldest_path)
+                    else:
+                        os.remove(oldest_path)
+                    logger.info(f"Deleted oldest periodic checkpoint: {oldest_path}")
+                    print(f"Deleted oldest periodic checkpoint: {oldest_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to delete oldest checkpoint {oldest_path}: {e}")
