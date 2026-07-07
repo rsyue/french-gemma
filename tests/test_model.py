@@ -76,3 +76,33 @@ def test_lr_scheduler():
         scheduler.step()
     # Should be decaying cosine
     assert optimizer.param_groups[0]["lr"] < 1e-3
+
+def test_embedding_noise():
+    vocab_size = 100
+    # Initialize model with non-zero embedding noise std
+    model = FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=vocab_size, embedding_noise_std=0.5)
+    
+    input_ids = torch.randint(0, vocab_size, (2, 8))
+    
+    # 1. In eval mode, outputs should be identical across calls (no noise injected)
+    model.eval()
+    with torch.no_grad():
+        out1 = model(input_ids)
+        out2 = model(input_ids)
+    assert torch.allclose(out1.logits, out2.logits, atol=1e-5)
+    
+    # 2. In train mode, outputs should differ due to noise injection
+    model.train()
+    with torch.no_grad():
+        out3 = model(input_ids)
+        out4 = model(input_ids)
+    assert not torch.allclose(out3.logits, out4.logits, atol=1e-4)
+    
+    # 3. If noise std is 0, train mode should produce identical outputs (no noise)
+    model_no_noise = FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=vocab_size, embedding_noise_std=0.0)
+    model_no_noise.train()
+    with torch.no_grad():
+        out5 = model_no_noise(input_ids)
+        out6 = model_no_noise(input_ids)
+    assert torch.allclose(out5.logits, out6.logits, atol=1e-5)
+
