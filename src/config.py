@@ -32,6 +32,8 @@ class TrainingConfig:
     output_dir: str = "./checkpoints"
     tb_log_dir: str = "./runs"
     embedding_noise_std: float = 0.0
+    max_eval_batches: int = 20
+    max_checkpoints: int = 5
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "TrainingConfig":
