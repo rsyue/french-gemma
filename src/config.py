@@ -26,6 +26,7 @@ class TrainingConfig:
     eval_interval: int = 500
     num_workers: int = 2
     prefetch_factor: int = 2
+    pin_memory: bool = True
     freeze_schedule: Dict[int, List[int]] = field(default_factory=dict)
     vocab_size: Optional[int] = None
     output_dir: str = "./checkpoints"

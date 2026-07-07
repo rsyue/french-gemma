@@ -66,11 +66,13 @@ def test_lr_scheduler():
     assert optimizer.param_groups[0]["lr"] == 1e-3 * 0.0
     
     # Step scheduler to step 1
+    optimizer.step()
     scheduler.step()
     assert optimizer.param_groups[0]["lr"] > 0.0
     
     # Step scheduler past warmup (step 11)
     for _ in range(10):
+        optimizer.step()
         scheduler.step()
     # Should be decaying cosine
     assert optimizer.param_groups[0]["lr"] < 1e-3

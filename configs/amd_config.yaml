@@ -20,3 +20,4 @@ prefetch_factor: 2
 freeze_schedule:
   0: []
 embedding_noise_std: 0.05
+pin_memory: true

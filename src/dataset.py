@@ -66,12 +66,15 @@ class PackedTextDataset(Dataset):
 def train_custom_tokenizer(
     texts: List[str],
     vocab_size: int = 32000,
-    save_dir: str = "./tokenizer_checkpoint"
+    save_dir: str = "./tokenizer_checkpoint",
+    special_tokens: Optional[List[str]] = None
 ) -> PreTrainedTokenizerFast:
     """
     Trains a custom ByteLevelBPETokenizer on provided texts and saves it as a HuggingFace PreTrainedTokenizerFast.
     """
     os.makedirs(save_dir, exist_ok=True)
+    if special_tokens is None:
+        special_tokens = ["<pad>", "<bos>", "<eos>", "<unk>"]
     
     # Write texts to a temporary file for the tokenizer trainer
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
@@ -85,7 +88,7 @@ def train_custom_tokenizer(
             files=[temp_file_path],
             vocab_size=vocab_size,
             min_frequency=2,
-            special_tokens=["<pad>", "<bos>", "<eos>", "<unk>"]
+            special_tokens=special_tokens
         )
         
         # Save tokenizer
@@ -95,16 +98,20 @@ def train_custom_tokenizer(
         # Wrap as PreTrainedTokenizerFast
         hf_tokenizer = PreTrainedTokenizerFast(
             tokenizer_file=tokenizer_json_path,
-            bos_token="<bos>",
-            eos_token="<eos>",
-            pad_token="<pad>",
-            unk_token="<unk>",
+            bos_token="<bos>" if "<bos>" in special_tokens else None,
+            eos_token="<eos>" if "<eos>" in special_tokens else None,
+            pad_token="<pad>" if "<pad>" in special_tokens else None,
+            unk_token="<unk>" if "<unk>" in special_tokens else None,
         )
+        
+        # Ensure correct padding side for training decoders (Right padding)
+        hf_tokenizer.padding_side = "right"
+        
         # Ensure pad_token_id, etc. are correctly assigned
-        hf_tokenizer.pad_token_id = 0
-        hf_tokenizer.bos_token_id = 1
-        hf_tokenizer.eos_token_id = 2
-        hf_tokenizer.unk_token_id = 3
+        hf_tokenizer.pad_token_id = special_tokens.index("<pad>") if "<pad>" in special_tokens else 0
+        hf_tokenizer.bos_token_id = special_tokens.index("<bos>") if "<bos>" in special_tokens else 1
+        hf_tokenizer.eos_token_id = special_tokens.index("<eos>") if "<eos>" in special_tokens else 2
+        hf_tokenizer.unk_token_id = special_tokens.index("<unk>") if "<unk>" in special_tokens else 3
         
         # Save the wrapped tokenizer configuration
         hf_tokenizer.save_pretrained(save_dir)
