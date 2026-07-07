@@ -1,0 +1,36 @@
+[project]
+name = "french-gemma"
+version = "0.1.0"
+description = "A modular library to pretrain a blank Gemma 3 model on French unsupervised data"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.0.0",
+    "transformers>=4.40.0",
+    "datasets>=2.18.0",
+    "tokenizers>=0.19.0",
+    "pyyaml>=6.0",
+    "tensorboard>=2.15.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.3.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N"]
+ignore = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+

@@ -4,6 +4,7 @@
 # @author: Richard Yue
 
 import argparse
+
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextStreamer
 
@@ -34,7 +35,13 @@ def main():
             {"role": "user", "content": prompt}
         ]
 
-        inputs = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_dict=True, return_tensors="pt").to(model.device)
+        inputs = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            return_tensors="pt",
+        ).to(model.device)
         with torch.autocast(device_type=str(model.device), dtype=dtype):
             with torch.inference_mode():
                 _ = model.generate(**inputs, streamer=streamer, max_new_tokens=(max_len - inputs.input_ids.dim()))

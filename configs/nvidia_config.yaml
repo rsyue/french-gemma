@@ -1,0 +1,23 @@
+model_id: "google/gemma-3-270m-it"
+dataset_path: "wikipedia"
+dataset_name: "20220301.fr"
+device: "cuda"
+max_sequence_length: 512
+batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 5.0e-5
+weight_decay: 0.01
+warmup_steps: 200
+max_steps: 15000
+compile: false
+amp_enabled: true
+amp_dtype: "float16"
+log_interval: 20
+save_interval: 2000
+eval_interval: 500
+num_workers: 1
+prefetch_factor: 2
+freeze_schedule:
+  0: [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+  5000: [12, 13, 14, 15, 16, 17]
+  10000: []
