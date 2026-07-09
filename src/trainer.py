@@ -122,11 +122,10 @@ class Pretrainer:
             self.is_main_process = (torch.distributed.get_rank() == 0)
 
         # Tensorboard writer
+        self.writer: Optional[SummaryWriter] = None
         if self.is_main_process:
             self.writer = SummaryWriter(log_dir=tb_log_dir)
             os.makedirs(self.output_dir, exist_ok=True)
-        else:
-            self.writer = None
         # Top perplexity and training loss checkpoints
         self.best_ppl_checkpoints: List[Dict[str, Any]] = []
         self.best_checkpoints = self.best_ppl_checkpoints
@@ -138,6 +137,13 @@ class Pretrainer:
         """
         Runs one training epoch.
         """
+        if (
+            self.train_dataloader is not None
+            and hasattr(self.train_dataloader, "sampler")
+            and hasattr(self.train_dataloader.sampler, "set_epoch")
+        ):
+            self.train_dataloader.sampler.set_epoch(epoch)
+
         self.model.train()
         accum_loss = 0.0
 

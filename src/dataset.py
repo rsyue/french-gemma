@@ -230,7 +230,7 @@ def get_dataloader(
     prefetch_factor: int = 2,
     pin_memory: bool = True,
     shuffle: bool = True,
-    sampler: Optional[torch.utils.data.Sampler] = None,
+    sampler: Optional[torch.utils.data.Sampler[int]] = None,
 ) -> DataLoader[Any]:
     """
     Creates a PyTorch DataLoader utilizing DataCollatorForLanguageModeling.
@@ -240,7 +240,7 @@ def get_dataloader(
         f"num_workers={num_workers}, pin_memory={pin_memory}, sampler={sampler}"
     )
     logger.info(msg)
-    collator = DataCollatorForLanguageModeling(tokenizer=dataset.tokenizer, mlm=False)
+    collator = DataCollatorForLanguageModeling(tokenizer=dataset.tokenizer, mlm=False)  # type: ignore[arg-type]
 
     # Prefetch factor must be None if num_workers is 0
     actual_prefetch = prefetch_factor if num_workers > 0 else None
