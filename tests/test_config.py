@@ -17,6 +17,7 @@ def test_config_defaults():
     config = TrainingConfig()
     assert config.max_eval_batches == 20
     assert config.max_checkpoints == 5
+    assert config.data_cache_dir == "./data_cache"
 
 
 def test_config_custom_values():

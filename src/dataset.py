@@ -7,10 +7,10 @@ load French text datasets, pack tokens with a sliding window stride, and build P
 
 import logging
 import os
-import tempfile
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
+import numpy as np
 import torch
 from datasets import load_dataset
 from tokenizers import ByteLevelBPETokenizer
@@ -24,6 +24,7 @@ class PackedTextDataset(Dataset[Dict[str, Any]]):
     """
     A PyTorch Dataset that tokenizes and packs text documents into sequences of
     max_sequence_length, separated by BOS and EOS tokens, using a sliding window overlap (stride).
+    Supports either in-memory chunking or loading from a numpy.memmap binary cache.
     """
 
     def __init__(
@@ -33,17 +34,30 @@ class PackedTextDataset(Dataset[Dict[str, Any]]):
         max_seq_len: int = 512,
         stride: int = 50,
         chunks: Optional[List[List[int]]] = None,
+        bin_path: Optional[str] = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
         self.stride = stride
+        self.bin_path = bin_path
+        self.chunks = None
+
+        if bin_path is not None:
+            self.data = np.memmap(bin_path, dtype=np.uint32, mode="r")
+            self.total_tokens = len(self.data)
+            self.step = max(1, max_seq_len - stride)
+            if self.total_tokens < max_seq_len:
+                self.num_chunks = 1
+            else:
+                self.num_chunks = (self.total_tokens - max_seq_len) // self.step + 1
+            return
 
         if chunks is not None:
             self.chunks = chunks
             return
 
-        assert texts is not None, "texts must be provided if chunks is None"
-        assert tokenizer is not None, "tokenizer must be provided if chunks is None"
+        assert texts is not None, "texts must be provided if chunks and bin_path are None"
+        assert tokenizer is not None, "tokenizer must be provided if chunks and bin_path are None"
 
         bos_id = tokenizer.bos_token_id
         eos_id = tokenizer.eos_token_id
@@ -118,9 +132,26 @@ class PackedTextDataset(Dataset[Dict[str, Any]]):
         logger.info(msg)
 
     def __len__(self) -> int:
+        if self.bin_path is not None:
+            return self.num_chunks
+        assert self.chunks is not None
         return len(self.chunks)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
+        if self.bin_path is not None:
+            if self.total_tokens < self.max_seq_len:
+                chunk = self.data[:].tolist()
+                pad_id = self.tokenizer.pad_token_id if self.tokenizer else 0
+                chunk = chunk + [pad_id] * (self.max_seq_len - len(chunk))
+            else:
+                start_idx = idx * self.step
+                end_idx = start_idx + self.max_seq_len
+                chunk = self.data[start_idx:end_idx].tolist()
+            return {
+                "input_ids": chunk,
+            }
+
+        assert self.chunks is not None
         chunk = self.chunks[idx]
         return {
             "input_ids": chunk,
@@ -128,7 +159,7 @@ class PackedTextDataset(Dataset[Dict[str, Any]]):
 
 
 def train_custom_tokenizer(
-    texts: List[str],
+    texts: Iterable[str],
     vocab_size: int = 32000,
     save_dir: str = "./tokenizer_checkpoint",
     special_tokens: Optional[List[str]] = None,
@@ -136,53 +167,49 @@ def train_custom_tokenizer(
     """
     Trains a custom ByteLevelBPETokenizer on provided texts and saves it as a HuggingFace PreTrainedTokenizerFast.
     """
-    logger.info(f"Training custom tokenizer on {len(texts)} texts, vocab_size={vocab_size}...")
+    from collections.abc import Sized
+    num_docs_str = f"{len(texts)}" if isinstance(texts, Sized) else "unknown number of"
+    logger.info(f"Training custom tokenizer on {num_docs_str} texts, vocab_size={vocab_size}...")
     t0 = time.time()
     os.makedirs(save_dir, exist_ok=True)
     if special_tokens is None:
         special_tokens = ["<pad>", "<bos>", "<eos>", "<unk>"]
 
-    temp_file_path = None
-    try:
-        # Write texts to a temporary file for the tokenizer trainer
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
-            for text in texts:
-                f.write(text + "\n")
-            temp_file_path = f.name
+    tokenizer = ByteLevelBPETokenizer()
+    tokenizer.train_from_iterator(
+        texts,
+        vocab_size=vocab_size,
+        min_frequency=2,
+        special_tokens=special_tokens,
+    )
 
-        tokenizer = ByteLevelBPETokenizer()
-        tokenizer.train(files=[temp_file_path], vocab_size=vocab_size, min_frequency=2, special_tokens=special_tokens)
+    # Save tokenizer
+    tokenizer_json_path = os.path.join(save_dir, "tokenizer.json")
+    tokenizer.save(tokenizer_json_path)
 
-        # Save tokenizer
-        tokenizer_json_path = os.path.join(save_dir, "tokenizer.json")
-        tokenizer.save(tokenizer_json_path)
+    # Wrap as PreTrainedTokenizerFast
+    hf_tokenizer = PreTrainedTokenizerFast(  # type: ignore[no-untyped-call]
+        tokenizer_file=tokenizer_json_path,
+        bos_token="<bos>" if "<bos>" in special_tokens else None,
+        eos_token="<eos>" if "<eos>" in special_tokens else None,
+        pad_token="<pad>" if "<pad>" in special_tokens else None,
+        unk_token="<unk>" if "<unk>" in special_tokens else None,
+    )
 
-        # Wrap as PreTrainedTokenizerFast
-        hf_tokenizer = PreTrainedTokenizerFast(  # type: ignore[no-untyped-call]
-            tokenizer_file=tokenizer_json_path,
-            bos_token="<bos>" if "<bos>" in special_tokens else None,
-            eos_token="<eos>" if "<eos>" in special_tokens else None,
-            pad_token="<pad>" if "<pad>" in special_tokens else None,
-            unk_token="<unk>" if "<unk>" in special_tokens else None,
-        )
+    # Ensure correct padding side for training decoders (Right padding)
+    hf_tokenizer.padding_side = "right"
 
-        # Ensure correct padding side for training decoders (Right padding)
-        hf_tokenizer.padding_side = "right"
+    # Ensure pad_token_id, etc. are correctly assigned
+    hf_tokenizer.pad_token_id = special_tokens.index("<pad>") if "<pad>" in special_tokens else 0
+    hf_tokenizer.bos_token_id = special_tokens.index("<bos>") if "<bos>" in special_tokens else 1
+    hf_tokenizer.eos_token_id = special_tokens.index("<eos>") if "<eos>" in special_tokens else 2
+    hf_tokenizer.unk_token_id = special_tokens.index("<unk>") if "<unk>" in special_tokens else 3
 
-        # Ensure pad_token_id, etc. are correctly assigned
-        hf_tokenizer.pad_token_id = special_tokens.index("<pad>") if "<pad>" in special_tokens else 0
-        hf_tokenizer.bos_token_id = special_tokens.index("<bos>") if "<bos>" in special_tokens else 1
-        hf_tokenizer.eos_token_id = special_tokens.index("<eos>") if "<eos>" in special_tokens else 2
-        hf_tokenizer.unk_token_id = special_tokens.index("<unk>") if "<unk>" in special_tokens else 3
-
-        # Save the wrapped tokenizer configuration
-        hf_tokenizer.save_pretrained(save_dir)
-        t_train = time.time() - t0
-        logger.info(f"Tokenizer training completed in {t_train:.2f} seconds. Saved to {save_dir}")
-        return hf_tokenizer
-    finally:
-        if temp_file_path is not None and os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
+    # Save the wrapped tokenizer configuration
+    hf_tokenizer.save_pretrained(save_dir)
+    t_train = time.time() - t0
+    logger.info(f"Tokenizer training completed in {t_train:.2f} seconds. Saved to {save_dir}")
+    return hf_tokenizer
 
 
 def load_french_dataset(

@@ -7,6 +7,7 @@ import logging
 import os
 from typing import Optional
 
+import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
@@ -30,6 +31,12 @@ def main() -> None:
         type=str,
         default="configs/mlx_config.yaml",
         help="Path to YAML configuration file",
+    )
+    parser.add_argument(
+        "--data-cache-dir",
+        type=str,
+        default=None,
+        help="Path to directory for caching tokenized data binary",
     )
     args = parser.parse_args()
 
@@ -60,18 +67,20 @@ def main() -> None:
 
     # 3. Load configuration
     config = TrainingConfig.from_yaml(args.config)
+    if args.data_cache_dir is not None:
+        config.data_cache_dir = args.data_cache_dir
     if not is_distributed:
         device = config.device
     logger.info(f"Loaded config from {args.config}. Device target: {device} | Distributed: {is_distributed}")
 
     # Set directories and cache paths
-    tokenizer_dir = os.path.join(config.output_dir, "tokenizer_checkpoint")
-    cache_path = os.path.join(config.output_dir, "packed_dataset_cache.pt")
+    tokenizer_dir = os.path.join(config.data_cache_dir, "tokenizer_checkpoint")
+    cache_path = os.path.join(config.data_cache_dir, "packed_dataset_cache.bin")
 
     # 4. Data preparation only on Rank 0
     if rank == 0:
         logger.info("Main process (Rank 0) starting data preparation...")
-        os.makedirs(config.output_dir, exist_ok=True)
+        os.makedirs(config.data_cache_dir, exist_ok=True)
 
         # Load dataset
         texts = load_french_dataset(
@@ -85,16 +94,26 @@ def main() -> None:
         logger.info("Training custom ByteLevelBPETokenizer on main process...")
         tokenizer = train_custom_tokenizer(texts, vocab_size=1000, save_dir=tokenizer_dir)
 
-        # Create packed sequences dataset and cache the chunks
-        logger.info("Packing tokens and generating cache file on main process...")
-        dataset = PackedTextDataset(
-            texts=texts,
-            tokenizer=tokenizer,
-            max_seq_len=config.max_sequence_length,
-            stride=50,
-        )
-        torch.save(dataset.chunks, cache_path)
-        logger.info(f"Main process finished data prep. Cached packed chunks to {cache_path}")
+        # Create packed sequences by streaming tokenization directly to the binary cache file on disk
+        logger.info("Packing tokens and generating binary cache file on main process...")
+        bos_id = tokenizer.bos_token_id
+        eos_id = tokenizer.eos_token_id
+
+        with open(cache_path, "wb") as f:
+            for text in texts:
+                if not text.strip():
+                    continue
+                tokens = tokenizer.encode(text, add_special_tokens=False)
+                doc_ids = []
+                if bos_id is not None:
+                    doc_ids.append(bos_id)
+                doc_ids.extend(tokens)
+                if eos_id is not None:
+                    doc_ids.append(eos_id)
+                
+                arr = np.array(doc_ids, dtype=np.uint32)
+                f.write(arr.tobytes())
+        logger.info(f"Main process finished data prep. Cached packed binary to {cache_path}")
 
     # 5. Barrier synchronization for workers
     if is_distributed:
@@ -106,13 +125,12 @@ def main() -> None:
     logger.info(f"Rank {rank} loading tokenizer from {tokenizer_dir}...")
     tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_dir)
 
-    logger.info(f"Rank {rank} loading packed dataset chunks from cache: {cache_path}")
-    chunks = torch.load(cache_path, map_location="cpu")
+    logger.info(f"Rank {rank} loading packed dataset from binary cache: {cache_path}")
     dataset = PackedTextDataset(
+        bin_path=cache_path,
         tokenizer=tokenizer,
         max_seq_len=config.max_sequence_length,
         stride=50,
-        chunks=chunks,
     )
     logger.info(f"Rank {rank} instantiated dataset with {len(dataset)} sequences.")
 

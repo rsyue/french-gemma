@@ -31,33 +31,42 @@ def ddp_worker(rank: int, world_size: int, tmpdir: str, mock_texts: list[str]) -
 
     try:
         tokenizer_dir = os.path.join(tmpdir, "tokenizer")
-        cache_path = os.path.join(tmpdir, "packed_dataset_cache.pt")
+        cache_path = os.path.join(tmpdir, "dataset.bin")
 
         # 2. Main Process Data Preparation
         if rank == 0:
             # Train tokenizer
             tokenizer = train_custom_tokenizer(mock_texts, vocab_size=100, save_dir=tokenizer_dir)
-            # Pack dataset
-            dataset = PackedTextDataset(
-                texts=mock_texts,
-                tokenizer=tokenizer,
-                max_seq_len=8,
-                stride=2,
-            )
-            # Save chunks to cache
-            torch.save(dataset.chunks, cache_path)
+            # Tokenize and write to binary cache
+            bos_id = tokenizer.bos_token_id
+            eos_id = tokenizer.eos_token_id
+
+            all_tokens = []
+            for text in mock_texts:
+                tokens = tokenizer.encode(text, add_special_tokens=False)
+                doc_ids = []
+                if bos_id is not None:
+                    doc_ids.append(bos_id)
+                doc_ids.extend(tokens)
+                if eos_id is not None:
+                    doc_ids.append(eos_id)
+                all_tokens.extend(doc_ids)
+
+            import numpy as np
+            arr = np.array(all_tokens, dtype=np.uint32)
+            with open(cache_path, "wb") as f:
+                f.write(arr.tobytes())
 
         # 3. Synchronize ranks
         dist.barrier()
 
         # 4. Load from cache on all processes
         tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_dir)
-        chunks = torch.load(cache_path, map_location="cpu")
         dataset = PackedTextDataset(
+            bin_path=cache_path,
             tokenizer=tokenizer,
             max_seq_len=8,
             stride=2,
-            chunks=chunks,
         )
 
         # 5. Distributed Samplers
