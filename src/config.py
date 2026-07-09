@@ -1,3 +1,9 @@
+"""
+Configuration Loader and Settings.
+
+This module parses YAML files into the TrainingConfig dataclass, defining training,
+hardware execution, datasets, tokenizer, optimization, and checkpoint settings.
+"""
 import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional

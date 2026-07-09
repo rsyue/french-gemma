@@ -1,3 +1,10 @@
+"""
+French Gemma 3 Training and Evaluation Loop.
+
+This module defines the Pretrainer class which handles the optimization loop,
+mixed-precision training, gradient accumulation, model evaluation, checkpoints
+management (perplexity and loss based), and TensorBoard metrics logging.
+"""
 import logging
 import math
 import os
@@ -43,7 +50,10 @@ def generate_text(
             if eos_id is not None and next_token.item() == eos_id:
                 break
                 
-    return tokenizer.decode(input_ids_tensor[0].tolist(), skip_special_tokens=True)
+    decoded = tokenizer.decode(input_ids_tensor[0].tolist(), skip_special_tokens=True)
+    if isinstance(decoded, list):
+        return decoded[0] if decoded else ""
+    return str(decoded)
 
 class Pretrainer:
     """
@@ -185,7 +195,8 @@ class Pretrainer:
                     current_lr = self.optimizer.param_groups[0]["lr"]
                     elapsed = time.time() - self.last_log_time
                     has_bs = self.train_dataloader and hasattr(self.train_dataloader, "batch_size")
-                    batch_size = self.train_dataloader.batch_size if has_bs else 1
+                    loader_bs = self.train_dataloader.batch_size
+                    batch_size = (loader_bs if loader_bs is not None else 1) if has_bs else 1
                     batches_processed = self.grad_accum_steps * self.log_interval
                     seqs_processed = batches_processed * batch_size
                     throughput = seqs_processed / elapsed if elapsed > 0 else 0

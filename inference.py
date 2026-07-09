@@ -1,8 +1,9 @@
-# Inference script for Gemma 3
-# Chat with the model
+"""
+Inference and Chat Interface for French Gemma 3.
 
-# @author: Richard Yue
-
+This script loads a pretrained Gemma 3 model and presents an interactive CLI chat loop
+utilizing text streaming decoding.
+"""
 import argparse
 
 import torch

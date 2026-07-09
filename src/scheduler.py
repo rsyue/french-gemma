@@ -1,3 +1,9 @@
+"""
+Learning Rate Restarts and Freeze Schedulers.
+
+This module provides the FreezeManager for freezing layers over training milestones,
+and constructs learning rate schedulers supporting linear warmup and cosine annealing with restarts.
+"""
 import logging
 import math
 from typing import Dict, List

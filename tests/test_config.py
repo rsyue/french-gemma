@@ -1,3 +1,9 @@
+"""
+Unit Tests for Training Configuration.
+
+This module contains unit tests that verify parsing of YAML configuration files,
+dataclass field defaults, and custom freeze schedule formatting.
+"""
 import os
 import tempfile
 

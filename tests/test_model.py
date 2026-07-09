@@ -1,3 +1,9 @@
+"""
+Unit Tests for Model Architecture and Freeze Schedules.
+
+This module contains unit tests validating base model wraps, LM Head projections,
+embedding noise injection, layer freezing scheduler steps, and cosine annealing schedules.
+"""
 import torch
 
 from src.model import FrenchGemmaModel

@@ -1,3 +1,9 @@
+"""
+Tokenizer Training and Dataset Packing.
+
+This module provides utilities to train a custom ByteLevelBPETokenizer on unsupervised texts,
+load French text datasets, pack tokens with a sliding window stride, and build PyTorch DataLoaders.
+"""
 import logging
 import os
 import tempfile

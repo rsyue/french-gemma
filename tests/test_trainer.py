@@ -1,3 +1,9 @@
+"""
+Unit and Integration Tests for the Pretraining Trainer.
+
+This module contains unit and mock integration tests that verify text generation functionality,
+single training epochs, validation evaluation runs, and checkpoint saving/rotation logic.
+"""
 import os
 import tempfile
 

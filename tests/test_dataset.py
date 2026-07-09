@@ -1,3 +1,9 @@
+"""
+Unit Tests for Custom Tokenizer and Dataset Packing.
+
+This module contains unit tests validating BPE tokenizer training, French dataset loaders,
+packed sliding-window sequence packing, padding conventions, and DataLoader building.
+"""
 import tempfile
 
 import pytest
