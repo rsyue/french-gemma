@@ -82,6 +82,9 @@ def get_lr_multiplier(
     """
     Computes learning rate multiplier supporting linear warmup and cosine annealing with warm restarts.
     """
+    if T_mult <= 1:
+        raise ValueError("T_mult must be greater than 1 to avoid infinite loops during cycle stepping.")
+
     if step < warmup_steps:
         # Linear warmup
         return float(step) / float(max(1, warmup_steps))

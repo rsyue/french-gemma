@@ -37,6 +37,7 @@ class TrainingConfig:
     freeze_schedule: Dict[int, List[int]] = field(default_factory=dict)
     vocab_size: Optional[int] = None
     output_dir: str = "./checkpoints"
+    data_cache_dir: str = "./data_cache"
     tb_log_dir: str = "./runs"
     embedding_noise_std: float = 0.0
     max_eval_batches: int = 20

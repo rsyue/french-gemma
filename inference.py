@@ -11,10 +11,20 @@ from typing import Any
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextStreamer
 
+
+def parse_dtype(dtype_str: str) -> torch.dtype:
+    if dtype_str == "float16":
+        return torch.float16
+    elif dtype_str == "bfloat16":
+        return torch.bfloat16
+    elif dtype_str == "float32":
+        return torch.float32
+    raise argparse.ArgumentTypeError(f"Unsupported dtype: {dtype_str}")
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", help="The model to use", default="google/gemma-3-270m-it")
-parser.add_argument("--max-len", help="The context length for generation", default=2048)
-parser.add_argument("--dtype", help="The dtype to use for model and tokens", default=torch.bfloat16)
+parser.add_argument("--max-len", help="The context length for generation", type=int, default=2048)
+parser.add_argument("--dtype", help="The dtype to use for model and tokens", type=parse_dtype, default=torch.bfloat16)
 args = parser.parse_args()
 
 model_id = args.model
@@ -48,7 +58,7 @@ def main() -> None:
         inputs = inputs_any.to(model.device)
         with torch.autocast(device_type=str(model.device), dtype=dtype):
             with torch.inference_mode():
-                _ = model.generate(**inputs, streamer=streamer, max_new_tokens=(max_len - inputs.input_ids.dim()))
+                _ = model.generate(**inputs, streamer=streamer, max_new_tokens=(max_len - inputs.input_ids.shape[1]))
         print()
 
 

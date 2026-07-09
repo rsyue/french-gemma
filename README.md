@@ -77,6 +77,12 @@ Confirm that the code conforms to style and naming requirements:
 source .venv/bin/activate && ruff check .
 ```
 
+### 5. Run Type Checker
+Verify that there are no static type errors:
+```bash
+source .venv/bin/activate && mypy .
+```
+
 ---
 
 ## Sample Training Run (Mac / Apple Silicon)
@@ -166,9 +172,19 @@ if __name__ == "__main__":
     main()
 ```
 
-Run the training script inside the virtual environment:
+Run the training script in single-process mode inside the virtual environment:
 ```bash
-source .venv/bin/activate && python run_training.py
+source .venv/bin/activate && python scripts/run_training.py --config configs/mlx_config.yaml
+```
+
+### Multi-GPU Pretraining Run (DDP via `torchrun`)
+To train French Gemma 3 using multiple GPUs, use the launcher helper:
+```bash
+source .venv/bin/activate && ./scripts/run_ddp.sh --config configs/nvidia_config.yaml --gpus 2
+```
+Or launch directly using `torchrun`:
+```bash
+source .venv/bin/activate && torchrun --nproc_per_node=2 scripts/run_training.py --config configs/nvidia_config.yaml
 ```
 
 ---

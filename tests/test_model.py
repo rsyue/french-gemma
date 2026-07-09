@@ -5,6 +5,7 @@ This module contains unit tests validating base model wraps, LM Head projections
 embedding noise injection, layer freezing scheduler steps, and cosine annealing schedules.
 """
 
+import pytest
 import torch
 
 from src.model import FrenchGemmaModel
@@ -83,6 +84,10 @@ def test_lr_scheduler():
         scheduler.step()
     # Should be decaying cosine
     assert optimizer.param_groups[0]["lr"] < 1e-3
+
+    # T_mult <= 1 should raise ValueError
+    with pytest.raises(ValueError, match="T_mult must be greater than 1"):
+        get_cosine_warmup_scheduler(optimizer, warmup_steps=10, T_0=50, T_mult=1)
 
 
 def test_embedding_noise():

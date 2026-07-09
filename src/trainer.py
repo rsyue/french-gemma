@@ -116,9 +116,16 @@ class Pretrainer:
         if self.amp_enabled and self.device_type == "cuda" and self.amp_dtype == torch.float16:
             self.scaler = torch.amp.GradScaler("cuda")  # type: ignore[attr-defined]
 
+        # Setup DDP rank detection
+        self.is_main_process = True
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            self.is_main_process = (torch.distributed.get_rank() == 0)
+
         # Tensorboard writer
-        self.writer = SummaryWriter(log_dir=tb_log_dir)
-        os.makedirs(self.output_dir, exist_ok=True)
+        self.writer: Optional[SummaryWriter] = None
+        if self.is_main_process:
+            self.writer = SummaryWriter(log_dir=tb_log_dir)
+            os.makedirs(self.output_dir, exist_ok=True)
         # Top perplexity and training loss checkpoints
         self.best_ppl_checkpoints: List[Dict[str, Any]] = []
         self.best_checkpoints = self.best_ppl_checkpoints
@@ -130,6 +137,13 @@ class Pretrainer:
         """
         Runs one training epoch.
         """
+        if (
+            self.train_dataloader is not None
+            and hasattr(self.train_dataloader, "sampler")
+            and hasattr(self.train_dataloader.sampler, "set_epoch")
+        ):
+            self.train_dataloader.sampler.set_epoch(epoch)
+
         self.model.train()
         accum_loss = 0.0
 
@@ -193,8 +207,8 @@ class Pretrainer:
                     current_lr = self.optimizer.param_groups[0]["lr"]
                     elapsed = time.time() - self.last_log_time
                     has_bs = self.train_dataloader and hasattr(self.train_dataloader, "batch_size")
-                    loader_bs = self.train_dataloader.batch_size
-                    batch_size = (loader_bs if loader_bs is not None else 1) if has_bs else 1
+                    loader_bs = self.train_dataloader.batch_size if has_bs else 1
+                    batch_size = loader_bs if loader_bs is not None else 1
                     batches_processed = self.grad_accum_steps * self.log_interval
                     seqs_processed = batches_processed * batch_size
                     throughput = seqs_processed / elapsed if elapsed > 0 else 0
@@ -203,11 +217,12 @@ class Pretrainer:
                         f"LR: {current_lr:.6e} | Speed: {throughput:.2f} seqs/sec "
                         f"({elapsed:.2f}s elapsed)"
                     )
-                    logger.info(msg)
-                    print(msg)
-                    self.writer.add_scalar("Loss/train", accum_loss, global_step)
-                    self.writer.add_scalar("LR/train", current_lr, global_step)
-                    self.writer.add_scalar("Speed/train_seqs_per_sec", throughput, global_step)
+                    if self.is_main_process:
+                        logger.info(msg)
+                        if self.writer is not None:
+                            self.writer.add_scalar("Loss/train", accum_loss, global_step)
+                            self.writer.add_scalar("LR/train", current_lr, global_step)
+                            self.writer.add_scalar("Speed/train_seqs_per_sec", throughput, global_step)
                     self.last_log_time = time.time()
 
                 self.latest_train_loss = accum_loss
@@ -230,11 +245,12 @@ class Pretrainer:
         Runs the evaluation loop: computes perplexity and logs sample generation.
         """
         if self.val_dataloader is None:
-            logger.info("Validation dataloader not provided, skipping evaluation.")
+            if self.is_main_process:
+                logger.info("Validation dataloader not provided, skipping evaluation.")
             return float("inf")
 
-        logger.info("Starting validation loop...")
-        print("Starting validation loop...")
+        if self.is_main_process:
+            logger.info("Starting validation loop...")
         t_eval_start = time.time()
 
         self.model.eval()
@@ -262,10 +278,17 @@ class Pretrainer:
 
                 if total_val_batches is not None and total_val_batches >= 10:
                     if (batch_idx + 1) % max(1, total_val_batches // 5) == 0 or (batch_idx + 1) == total_val_batches:
-                        logger.info(f"Eval progress: batch {batch_idx + 1}/{total_val_batches}")
-                        print(f"Eval progress: batch {batch_idx + 1}/{total_val_batches}")
+                        if self.is_main_process:
+                            logger.info(f"Eval progress: batch {batch_idx + 1}/{total_val_batches}")
 
         avg_loss = total_loss / max(1, total_batches)
+
+        # Average validation loss across all ranks in DDP environment
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            loss_tensor = torch.tensor(avg_loss, device=self.device)
+            torch.distributed.all_reduce(loss_tensor, op=torch.distributed.ReduceOp.SUM)
+            avg_loss = loss_tensor.item() / torch.distributed.get_world_size()
+
         perplexity = math.exp(avg_loss) if avg_loss < 20 else float("inf")
         t_eval = time.time() - t_eval_start
 
@@ -273,19 +296,20 @@ class Pretrainer:
             f"--- Eval Step {global_step} | Loss: {avg_loss:.4f} | "
             f"Perplexity: {perplexity:.4f} | Time: {t_eval:.2f}s ---"
         )
-        logger.info(msg)
-        print(msg)
+        if self.is_main_process:
+            logger.info(msg)
 
         # Test generation
         sample_prompt = "Le français est"
         generated = generate_text(self.model, self.tokenizer, sample_prompt, max_new_tokens=20, device=self.device)
-        logger.info(f"Sample generation: '{generated}'")
-        print(f"Sample generation: '{generated}'")
+        if self.is_main_process:
+            logger.info(f"Sample generation: '{generated}'")
 
         # Log to tensorboard
-        self.writer.add_scalar("Loss/val", avg_loss, global_step)
-        self.writer.add_scalar("Perplexity/val", perplexity, global_step)
-        self.writer.add_text("Generation/val", generated, global_step)
+        if self.is_main_process and self.writer is not None:
+            self.writer.add_scalar("Loss/val", avg_loss, global_step)
+            self.writer.add_scalar("Perplexity/val", perplexity, global_step)
+            self.writer.add_text("Generation/val", generated, global_step)
 
         # Manage best checkpoints
         self.save_best_perplexity_checkpoint(global_step, perplexity)
@@ -298,6 +322,9 @@ class Pretrainer:
         """
         Saves a checkpoint and retains only the 2 best checkpoints based on perplexity.
         """
+        if not self.is_main_process:
+            return
+
         checkpoint_name = f"checkpoint-step-{global_step}-ppl-{perplexity:.2f}"
         checkpoint_path = os.path.join(self.output_dir, checkpoint_name)
 
@@ -318,7 +345,6 @@ class Pretrainer:
                         else:
                             os.remove(worst_path)
                         logger.info(f"Removed worst perplexity checkpoint file: {worst_path}")
-                        print(f"Removed worst perplexity checkpoint file: {worst_path}")
                     except Exception as e:
                         logger.warning(f"Failed to delete checkpoint {worst_path}: {e}")
                 self.best_ppl_checkpoints.remove(worst)
@@ -335,15 +361,16 @@ class Pretrainer:
             )
             self.best_ppl_checkpoints.append({"path": checkpoint_path, "perplexity": perplexity})
             logger.info(f"Saved new best perplexity checkpoint: {checkpoint_path}")
-            print(f"Saved new best perplexity checkpoint: {checkpoint_path}")
         else:
             logger.info(f"No improvement in perplexity (current: {perplexity:.4f}). Leaving checkpoints in place.")
-            print(f"No improvement in perplexity (current: {perplexity:.4f}). Leaving checkpoints in place.")
 
     def save_best_loss_checkpoint(self, global_step: int, train_loss: float) -> None:
         """
         Saves a checkpoint and retains only the 3 best checkpoints based on training loss.
         """
+        if not self.is_main_process:
+            return
+
         checkpoint_name = f"checkpoint-step-{global_step}-loss-{train_loss:.4f}"
         checkpoint_path = os.path.join(self.output_dir, checkpoint_name)
 
@@ -364,7 +391,6 @@ class Pretrainer:
                         else:
                             os.remove(worst_path)
                         logger.info(f"Removed worst training loss checkpoint file: {worst_path}")
-                        print(f"Removed worst training loss checkpoint file: {worst_path}")
                     except Exception as e:
                         logger.warning(f"Failed to delete checkpoint {worst_path}: {e}")
                 self.best_loss_checkpoints.remove(worst)
@@ -381,10 +407,8 @@ class Pretrainer:
             )
             self.best_loss_checkpoints.append({"path": checkpoint_path, "loss": train_loss})
             logger.info(f"Saved new best training loss checkpoint: {checkpoint_path}")
-            print(f"Saved new best training loss checkpoint: {checkpoint_path}")
         else:
             logger.info(f"No improvement in training loss (current: {train_loss:.4f}). Leaving checkpoints in place.")
-            print(f"No improvement in training loss (current: {train_loss:.4f}). Leaving checkpoints in place.")
 
     def save_best_checkpoint(self, global_step: int, perplexity: float) -> None:
         """
@@ -396,6 +420,9 @@ class Pretrainer:
         """
         Saves a standard step checkpoint.
         """
+        if not self.is_main_process:
+            return
+
         checkpoint_name = f"checkpoint-step-{global_step}"
         checkpoint_path = os.path.join(self.output_dir, checkpoint_name)
         torch.save(
@@ -408,7 +435,6 @@ class Pretrainer:
             checkpoint_path,
         )
         logger.info(f"Saved periodic checkpoint: {checkpoint_path}")
-        print(f"Saved periodic checkpoint: {checkpoint_path}")
 
         self.periodic_checkpoints.append(checkpoint_path)
         if len(self.periodic_checkpoints) > self.max_checkpoints:
@@ -422,6 +448,12 @@ class Pretrainer:
                     else:
                         os.remove(oldest_path)
                     logger.info(f"Deleted oldest periodic checkpoint: {oldest_path}")
-                    print(f"Deleted oldest periodic checkpoint: {oldest_path}")
                 except Exception as e:
                     logger.warning(f"Failed to delete oldest checkpoint {oldest_path}: {e}")
+
+    def close(self) -> None:
+        """
+        Closes the TensorBoard writer.
+        """
+        if hasattr(self, "writer") and self.writer is not None:
+            self.writer.close()
