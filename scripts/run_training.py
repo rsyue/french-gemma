@@ -81,6 +81,12 @@ def main() -> None:
     if rank == 0:
         logger.info("Main process (Rank 0) starting data preparation...")
         os.makedirs(config.data_cache_dir, exist_ok=True)
+        if os.path.exists(cache_path):
+            logger.warning(
+                f"Binary cache file already exists at {cache_path}. "
+                "Overwriting the existing cache. Ensure this is intentional "
+                "and no other runs are sharing this directory."
+            )
 
         # Load dataset
         texts = load_french_dataset(

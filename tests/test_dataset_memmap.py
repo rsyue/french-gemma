@@ -6,6 +6,7 @@ import os
 import tempfile
 
 import numpy as np
+import pytest
 from transformers import PreTrainedTokenizerFast
 
 from src.dataset import PackedTextDataset, train_custom_tokenizer
@@ -128,3 +129,17 @@ def test_packed_text_dataset_memmap_padding():
         # The rest should be padding
         pad_id = tokenizer.pad_token_id or 0
         assert item["input_ids"][len(all_tokens):] == [pad_id] * (max_seq_len - len(all_tokens))
+
+
+def test_packed_text_dataset_memmap_empty():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bin_path = os.path.join(tmpdir, "empty_dataset.bin")
+        # Create empty file
+        open(bin_path, "wb").close()
+
+        with pytest.raises(ValueError, match="is empty. Cannot initialize PackedTextDataset"):
+            PackedTextDataset(
+                bin_path=bin_path,
+                max_seq_len=8,
+                stride=2,
+            )

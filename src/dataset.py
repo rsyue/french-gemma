@@ -43,6 +43,10 @@ class PackedTextDataset(Dataset[Dict[str, Any]]):
         self.chunks = None
 
         if bin_path is not None:
+            if not os.path.exists(bin_path):
+                raise FileNotFoundError(f"Binary cache file not found: {bin_path}")
+            if os.path.getsize(bin_path) == 0:
+                raise ValueError(f"The binary cache file at {bin_path} is empty. Cannot initialize PackedTextDataset.")
             self.data = np.memmap(bin_path, dtype=np.uint32, mode="r")
             self.total_tokens = len(self.data)
             self.step = max(1, max_seq_len - stride)
