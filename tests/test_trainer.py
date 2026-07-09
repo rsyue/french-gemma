@@ -4,6 +4,7 @@ Unit and Integration Tests for the Pretraining Trainer.
 This module contains unit and mock integration tests that verify text generation functionality,
 single training epochs, validation evaluation runs, and checkpoint saving/rotation logic.
 """
+
 import os
 import tempfile
 
@@ -20,29 +21,29 @@ def test_trainer_integration():
         "Ceci est un texte de test en français pour vérifier l'intégration.",
         "Le processus de pré-entraînement doit se dérouler sans erreur.",
     ]
-    
+
     with tempfile.TemporaryDirectory() as tmpdir:
         # 1. Setup tokenizer
         tok_dir = os.path.join(tmpdir, "tokenizer")
         tokenizer = train_custom_tokenizer(mock_texts, vocab_size=150, save_dir=tok_dir)
         vocab_size = len(tokenizer)
-        
+
         # 2. Setup dataset and loader
         dataset = PackedTextDataset(mock_texts, tokenizer, max_seq_len=8, stride=2)
         dl = get_dataloader(dataset, batch_size=2, num_workers=0, pin_memory=False)
-        
+
         # 3. Setup model
         model = FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=vocab_size)
-        
+
         # 4. Setup optimizers & schedulers
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
         lr_scheduler = get_cosine_warmup_scheduler(optimizer, warmup_steps=1, T_0=10)
         freeze_manager = FreezeManager(model, {0: [0]})
-        
+
         # 5. Setup Trainer
         chk_dir = os.path.join(tmpdir, "checkpoints")
         run_dir = os.path.join(tmpdir, "runs")
-        
+
         trainer = Pretrainer(
             model=model,
             tokenizer=tokenizer,
@@ -60,19 +61,20 @@ def test_trainer_integration():
             eval_interval=2,
             save_interval=2,
             output_dir=chk_dir,
-            tb_log_dir=run_dir
+            tb_log_dir=run_dir,
         )
-        
+
         # 6. Train for 2 steps
         global_step = trainer.train_epoch(epoch=0, global_step=0)
         assert global_step > 0
-        
+
         # 7. Check check-pointing
         assert len(os.listdir(chk_dir)) > 0
-        
+
         # 8. Test generate
         generated = generate_text(model, tokenizer, "Test", max_new_tokens=5, device="cpu")
         assert len(generated) > 0
+
 
 def test_best_checkpoint_rotation():
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -81,16 +83,17 @@ def test_best_checkpoint_rotation():
             def __init__(self):
                 super().__init__()
                 self.linear = torch.nn.Linear(10, 10)
+
             def state_dict(self):
                 return {"weights": torch.ones(10)}
-                
+
         class MockOptimizer:
             def state_dict(self):
                 return {}
-                
+
         trainer = Pretrainer(
             model=MockModel(),
-            tokenizer=None, # not used in save_best_checkpoint
+            tokenizer=None,  # not used in save_best_checkpoint
             train_dataloader=None,
             val_dataloader=None,
             optimizer=MockOptimizer(),
@@ -99,20 +102,20 @@ def test_best_checkpoint_rotation():
             device="cpu",
             amp_enabled=False,
             output_dir=tmpdir,
-            tb_log_dir=os.path.join(tmpdir, "runs")
+            tb_log_dir=os.path.join(tmpdir, "runs"),
         )
-        
+
         # Save 3 checkpoints with decreasing perplexity (lower is better)
         trainer.save_best_checkpoint(global_step=1, perplexity=100.0)
         trainer.save_best_checkpoint(global_step=2, perplexity=80.0)
-        
+
         # We should have 2 checkpoints saved
         chkpts = [f for f in os.listdir(tmpdir) if f.startswith("checkpoint-step-")]
         assert len(chkpts) == 2
-        
+
         # Save a 3rd one that is better (ppl=40)
         trainer.save_best_checkpoint(global_step=3, perplexity=40.0)
-        
+
         # Should still have only 2 checkpoints (the one with ppl=100.0 should be deleted)
         chkpts_after = [f for f in os.listdir(tmpdir) if f.startswith("checkpoint-step-")]
         assert len(chkpts_after) == 2
@@ -122,17 +125,19 @@ def test_best_checkpoint_rotation():
 
 def test_best_loss_checkpoint_rotation():
     with tempfile.TemporaryDirectory() as tmpdir:
+
         class MockModel(torch.nn.Module):
             def __init__(self):
                 super().__init__()
                 self.linear = torch.nn.Linear(10, 10)
+
             def state_dict(self):
                 return {"weights": torch.ones(10)}
-                
+
         class MockOptimizer:
             def state_dict(self):
                 return {}
-                
+
         trainer = Pretrainer(
             model=MockModel(),
             tokenizer=None,
@@ -144,27 +149,26 @@ def test_best_loss_checkpoint_rotation():
             device="cpu",
             amp_enabled=False,
             output_dir=tmpdir,
-            tb_log_dir=os.path.join(tmpdir, "runs")
+            tb_log_dir=os.path.join(tmpdir, "runs"),
         )
-        
+
         # Save 4 checkpoints with decreasing training loss (lower is better)
         trainer.save_best_loss_checkpoint(global_step=1, train_loss=1.5)
         trainer.save_best_loss_checkpoint(global_step=2, train_loss=1.2)
         trainer.save_best_loss_checkpoint(global_step=3, train_loss=0.9)
-        
+
         # We should have 3 checkpoints saved
         chkpts = [f for f in os.listdir(tmpdir) if f.startswith("checkpoint-step-")]
         assert len(chkpts) == 3
-        
+
         # Save a 4th one that is better (loss=0.5)
         trainer.save_best_loss_checkpoint(global_step=4, train_loss=0.5)
-        
+
         # Should still have only 3 checkpoints (the one with loss=1.5000 should be deleted)
         chkpts_after = [f for f in os.listdir(tmpdir) if f.startswith("checkpoint-step-")]
         assert len(chkpts_after) == 3
         assert not any("loss-1.5000" in name for name in chkpts_after)
         assert any("loss-0.5000" in name for name in chkpts_after)
-
 
 
 def test_trainer_max_eval_batches():
@@ -173,13 +177,17 @@ def test_trainer_max_eval_batches():
             super().__init__()
             self.linear = torch.nn.Linear(10, 10)
             self.forward_calls = 0
+
         def state_dict(self):
             return {}
+
         def forward(self, input_ids, attention_mask=None, labels=None):
             self.forward_calls += 1
+
             class Outputs:
                 loss = torch.tensor(1.0)
                 logits = torch.ones(1, 1, 10)
+
             return Outputs()
 
     class MockOptimizer:
@@ -191,8 +199,10 @@ def test_trainer_max_eval_batches():
         eos_token_id = 2
         pad_token_id = 0
         unk_token_id = 3
+
         def encode(self, text, add_special_tokens=True):
             return [1]
+
         def decode(self, ids, skip_special_tokens=True):
             return "Le français est"
 
@@ -213,9 +223,9 @@ def test_trainer_max_eval_batches():
             amp_enabled=False,
             output_dir=tmpdir,
             tb_log_dir=os.path.join(tmpdir, "runs"),
-            max_eval_batches=2
+            max_eval_batches=2,
         )
-        
+
         perplexity = trainer.evaluate(global_step=1)
         assert perplexity is not None
         # 2 eval batches + 20 generation steps in generate_text
@@ -224,10 +234,12 @@ def test_trainer_max_eval_batches():
 
 def test_periodic_checkpoint_rotation():
     with tempfile.TemporaryDirectory() as tmpdir:
+
         class MockModel(torch.nn.Module):
             def __init__(self):
                 super().__init__()
                 self.linear = torch.nn.Linear(10, 10)
+
             def state_dict(self):
                 return {"weight": torch.ones(10)}
 
@@ -247,7 +259,7 @@ def test_periodic_checkpoint_rotation():
             amp_enabled=False,
             output_dir=tmpdir,
             tb_log_dir=os.path.join(tmpdir, "runs"),
-            max_checkpoints=2
+            max_checkpoints=2,
         )
 
         trainer.save_checkpoint(global_step=100)
@@ -259,7 +271,3 @@ def test_periodic_checkpoint_rotation():
         assert "checkpoint-step-100" not in chkpts
         assert "checkpoint-step-200" in chkpts
         assert "checkpoint-step-300" in chkpts
-
-
-
-

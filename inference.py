@@ -4,7 +4,9 @@ Inference and Chat Interface for French Gemma 3.
 This script loads a pretrained Gemma 3 model and presents an interactive CLI chat loop
 utilizing text streaming decoding.
 """
+
 import argparse
+from typing import Any
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextStreamer
@@ -21,32 +23,34 @@ dtype = args.dtype
 
 tokenizer = AutoTokenizer.from_pretrained(model_id, is_fast=True, truncation=True, max_length=max_len)
 
-model = AutoModelForCausalLM.from_pretrained(model_id, device_map="auto", dtype=dtype).eval()
+model = AutoModelForCausalLM.from_pretrained(
+    model_id, device_map="auto", dtype=dtype
+).eval()  # type: ignore[no-untyped-call]
 model.generation_config.pad_token_id = tokenizer.eos_token_id
 print(f"Using device: {model.device}")
 streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
 
-def main():
+
+def main() -> None:
     while True:
         prompt = input("Prompt: ")
         print()
 
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": prompt}
-        ]
+        messages = [{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": prompt}]
 
-        inputs = tokenizer.apply_chat_template(
+        inputs_any: Any = tokenizer.apply_chat_template(
             messages,
             tokenize=True,
             add_generation_prompt=True,
             return_dict=True,
             return_tensors="pt",
-        ).to(model.device)
+        )
+        inputs = inputs_any.to(model.device)
         with torch.autocast(device_type=str(model.device), dtype=dtype):
             with torch.inference_mode():
                 _ = model.generate(**inputs, streamer=streamer, max_new_tokens=(max_len - inputs.input_ids.dim()))
         print()
+
 
 if __name__ == "__main__":
     main()

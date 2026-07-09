@@ -18,12 +18,23 @@ dev = [
     "pytest>=8.0.0",
     "ruff>=0.3.0",
     "mypy>=1.0.0",
+    "flake8>=6.0.0",
+    "black>=23.0.0",
 ]
+
+[tool.black]
+line-length = 120
+target-version = ['py312']
 
 [tool.mypy]
 python_version = "3.12"
+strict = true
 ignore_missing_imports = true
 warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+ignore_errors = true
 
 [build-system]
 requires = ["hatchling"]

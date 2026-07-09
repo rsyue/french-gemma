@@ -4,6 +4,7 @@ Configuration Loader and Settings.
 This module parses YAML files into the TrainingConfig dataclass, defining training,
 hardware execution, datasets, tokenizer, optimization, and checkpoint settings.
 """
+
 import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -47,9 +48,9 @@ class TrainingConfig:
             raise FileNotFoundError(f"Configuration file not found: {yaml_path}")
         with open(yaml_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
-        
+
         # Parse freeze schedule keys as integers
         if "freeze_schedule" in data and data["freeze_schedule"] is not None:
             data["freeze_schedule"] = {int(k): list(v) for k, v in data["freeze_schedule"].items()}
-            
+
         return cls(**data)
