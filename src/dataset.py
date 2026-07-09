@@ -142,13 +142,14 @@ def train_custom_tokenizer(
     if special_tokens is None:
         special_tokens = ["<pad>", "<bos>", "<eos>", "<unk>"]
 
-    # Write texts to a temporary file for the tokenizer trainer
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
-        for text in texts:
-            f.write(text + "\n")
-        temp_file_path = f.name
-
+    temp_file_path = None
     try:
+        # Write texts to a temporary file for the tokenizer trainer
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
+            for text in texts:
+                f.write(text + "\n")
+            temp_file_path = f.name
+
         tokenizer = ByteLevelBPETokenizer()
         tokenizer.train(files=[temp_file_path], vocab_size=vocab_size, min_frequency=2, special_tokens=special_tokens)
 
@@ -180,7 +181,7 @@ def train_custom_tokenizer(
         logger.info(f"Tokenizer training completed in {t_train:.2f} seconds. Saved to {save_dir}")
         return hf_tokenizer
     finally:
-        if os.path.exists(temp_file_path):
+        if temp_file_path is not None and os.path.exists(temp_file_path):
             os.remove(temp_file_path)
 
 
