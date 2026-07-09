@@ -11,6 +11,7 @@ import tempfile
 import time
 from typing import Any, Dict, List, Optional
 
+import torch
 from datasets import load_dataset
 from tokenizers import ByteLevelBPETokenizer
 from torch.utils.data import DataLoader, Dataset
@@ -26,11 +27,23 @@ class PackedTextDataset(Dataset[Dict[str, Any]]):
     """
 
     def __init__(
-        self, texts: List[str], tokenizer: PreTrainedTokenizerFast, max_seq_len: int, stride: int = 50
+        self,
+        texts: Optional[List[str]] = None,
+        tokenizer: Optional[PreTrainedTokenizerFast] = None,
+        max_seq_len: int = 512,
+        stride: int = 50,
+        chunks: Optional[List[List[int]]] = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
         self.stride = stride
+
+        if chunks is not None:
+            self.chunks = chunks
+            return
+
+        assert texts is not None, "texts must be provided if chunks is None"
+        assert tokenizer is not None, "tokenizer must be provided if chunks is None"
 
         bos_id = tokenizer.bos_token_id
         eos_id = tokenizer.eos_token_id
@@ -38,7 +51,6 @@ class PackedTextDataset(Dataset[Dict[str, Any]]):
         t0 = time.time()
         total_texts = len(texts)
         logger.info(f"Starting tokenization of {total_texts} documents...")
-        print(f"Starting tokenization of {total_texts} documents...")
 
         # Tokenize and format each document as [BOS] + tokens + [EOS]
         all_token_ids = []
@@ -66,7 +78,6 @@ class PackedTextDataset(Dataset[Dict[str, Any]]):
                     f"({progress_pct:.1f}%) | Speed: {throughput:.2f} docs/sec"
                 )
                 logger.info(msg)
-                print(msg)
 
         t_tokenize = time.time() - t0
         msg = (
@@ -75,11 +86,9 @@ class PackedTextDataset(Dataset[Dict[str, Any]]):
             f"Total tokens: {len(all_token_ids)}"
         )
         logger.info(msg)
-        print(msg)
 
         # Pack token ids into chunks using sliding window
         logger.info("Packing tokens into fixed-length sequences...")
-        print("Packing tokens into fixed-length sequences...")
         t_pack_start = time.time()
         self.chunks = []
         step = max(1, max_seq_len - stride)
@@ -99,7 +108,6 @@ class PackedTextDataset(Dataset[Dict[str, Any]]):
                     pack_pct = ((chunk_idx + 1) / num_steps) * 100
                     msg = f"Packing progress: {chunk_idx + 1}/{num_steps} sequences packed ({pack_pct:.1f}%)"
                     logger.info(msg)
-                    print(msg)
 
         t_pack = time.time() - t_pack_start
         msg = (
@@ -108,7 +116,6 @@ class PackedTextDataset(Dataset[Dict[str, Any]]):
             f"(stride={stride}, step={step})."
         )
         logger.info(msg)
-        print(msg)
 
     def __len__(self) -> int:
         return len(self.chunks)
@@ -130,7 +137,6 @@ def train_custom_tokenizer(
     Trains a custom ByteLevelBPETokenizer on provided texts and saves it as a HuggingFace PreTrainedTokenizerFast.
     """
     logger.info(f"Training custom tokenizer on {len(texts)} texts, vocab_size={vocab_size}...")
-    print(f"Training custom tokenizer on {len(texts)} texts, vocab_size={vocab_size}...")
     t0 = time.time()
     os.makedirs(save_dir, exist_ok=True)
     if special_tokens is None:
@@ -172,7 +178,6 @@ def train_custom_tokenizer(
         hf_tokenizer.save_pretrained(save_dir)
         t_train = time.time() - t0
         logger.info(f"Tokenizer training completed in {t_train:.2f} seconds. Saved to {save_dir}")
-        print(f"Tokenizer training completed in {t_train:.2f} seconds. Saved to {save_dir}")
         return hf_tokenizer
     finally:
         if os.path.exists(temp_file_path):
@@ -204,7 +209,7 @@ def load_french_dataset(
                 return ds[str_cols[0]]  # type: ignore[no-any-return]
             return [str(row) for row in ds]
     except Exception as e:
-        print(f"Warning: Failed to load dataset {dataset_path}/{dataset_name}: {e}")
+        logger.warning(f"Failed to load dataset {dataset_path}/{dataset_name}: {e}")
         if fallback_texts:
             return fallback_texts
         # Default mock French corpus
@@ -225,25 +230,29 @@ def get_dataloader(
     prefetch_factor: int = 2,
     pin_memory: bool = True,
     shuffle: bool = True,
+    sampler: Optional[torch.utils.data.Sampler] = None,
 ) -> DataLoader[Any]:
     """
     Creates a PyTorch DataLoader utilizing DataCollatorForLanguageModeling.
     """
     msg = (
         f"Creating DataLoader: batch_size={batch_size}, shuffle={shuffle}, "
-        f"num_workers={num_workers}, pin_memory={pin_memory}"
+        f"num_workers={num_workers}, pin_memory={pin_memory}, sampler={sampler}"
     )
     logger.info(msg)
-    print(msg)
     collator = DataCollatorForLanguageModeling(tokenizer=dataset.tokenizer, mlm=False)
 
     # Prefetch factor must be None if num_workers is 0
     actual_prefetch = prefetch_factor if num_workers > 0 else None
 
+    # If sampler is provided, shuffle must be False
+    actual_shuffle = shuffle if sampler is None else False
+
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=shuffle,
+        shuffle=actual_shuffle,
+        sampler=sampler,
         num_workers=num_workers,
         prefetch_factor=actual_prefetch,
         pin_memory=pin_memory,

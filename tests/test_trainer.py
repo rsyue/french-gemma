@@ -74,6 +74,7 @@ def test_trainer_integration():
         # 8. Test generate
         generated = generate_text(model, tokenizer, "Test", max_new_tokens=5, device="cpu")
         assert len(generated) > 0
+        trainer.close()
 
 
 def test_best_checkpoint_rotation():
@@ -121,6 +122,7 @@ def test_best_checkpoint_rotation():
         assert len(chkpts_after) == 2
         assert not any("ppl-100.00" in name for name in chkpts_after)
         assert any("ppl-40.00" in name for name in chkpts_after)
+        trainer.close()
 
 
 def test_best_loss_checkpoint_rotation():
@@ -169,6 +171,7 @@ def test_best_loss_checkpoint_rotation():
         assert len(chkpts_after) == 3
         assert not any("loss-1.5000" in name for name in chkpts_after)
         assert any("loss-0.5000" in name for name in chkpts_after)
+        trainer.close()
 
 
 def test_trainer_max_eval_batches():
@@ -230,6 +233,7 @@ def test_trainer_max_eval_batches():
         assert perplexity is not None
         # 2 eval batches + 20 generation steps in generate_text
         assert model.forward_calls == 22
+        trainer.close()
 
 
 def test_periodic_checkpoint_rotation():
@@ -271,3 +275,4 @@ def test_periodic_checkpoint_rotation():
         assert "checkpoint-step-100" not in chkpts
         assert "checkpoint-step-200" in chkpts
         assert "checkpoint-step-300" in chkpts
+        trainer.close()
