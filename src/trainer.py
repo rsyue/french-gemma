@@ -22,10 +22,15 @@ logger = logging.getLogger(__name__)
 
 
 def generate_text(
-    model: nn.Module, tokenizer: PreTrainedTokenizerFast, prompt: str, max_new_tokens: int = 30, device: str = "cpu"
+    model: nn.Module,
+    tokenizer: PreTrainedTokenizerFast,
+    prompt: str,
+    max_new_tokens: int = 30,
+    device: str = "cpu",
+    repetition_penalty: float = 1.0,
 ) -> str:
     """
-    Autoregressively generates text from a prompt using greedy decoding.
+    Autoregressively generates text from a prompt using greedy decoding, optionally applying a repetition penalty.
     """
     model.eval()
     input_ids = tokenizer.encode(prompt, add_special_tokens=True)
@@ -41,7 +46,17 @@ def generate_text(
     for _ in range(max_new_tokens):
         with torch.no_grad():
             outputs = model(input_ids_tensor)
-            next_token_logits = outputs.logits[:, -1, :]
+            next_token_logits = outputs.logits[:, -1, :].clone()
+
+            if repetition_penalty != 1.0:
+                # Apply repetition penalty
+                for token_id in set(input_ids_tensor[0].tolist()):
+                    val = next_token_logits[0, token_id].item()
+                    if val > 0:
+                        next_token_logits[0, token_id] /= repetition_penalty
+                    else:
+                        next_token_logits[0, token_id] *= repetition_penalty
+
             next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
             input_ids_tensor = torch.cat([input_ids_tensor, next_token], dim=-1)
 

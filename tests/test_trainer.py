@@ -296,13 +296,15 @@ def test_generate_text_repetition_penalty():
             self.linear = torch.nn.Linear(10, 10)
 
         def forward(self, input_ids, attention_mask=None, labels=None):
-            logits = torch.zeros(input_ids.shape[0], input_ids.shape[1], 10)
-            logits[:, -1, 5] = 10.0
-            logits[:, -1, 6] = 8.0
+            local_logits = torch.zeros(input_ids.shape[0], input_ids.shape[1], 10)
+            local_logits[:, -1, 5] = 10.0
+            local_logits[:, -1, 6] = 8.0
             
             class Outputs:
-                logits = logits
-            return Outputs()
+                pass
+            out = Outputs()
+            out.logits = local_logits
+            return out
 
     model = MockModel()
     tokenizer = MockTokenizer()
