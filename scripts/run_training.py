@@ -3,9 +3,10 @@ Pretraining Script for French Gemma 3 supporting Single-GPU, MPS, and Multi-GPU 
 """
 
 import argparse
+import dataclasses
 import logging
 import os
-from typing import Optional
+from typing import Any, List, Optional, Union, get_args, get_origin
 
 import numpy as np
 import torch
@@ -23,8 +24,11 @@ from src.trainer import Pretrainer
 logger = logging.getLogger(__name__)
 
 
-def main() -> None:
-    # 1. Parse command line arguments
+def parse_and_load_config(args_list: Optional[List[str]] = None) -> TrainingConfig:
+    """
+    Parses CLI overrides dynamically based on TrainingConfig fields,
+    merges them with YAML configuration values, and uses defaults if not present.
+    """
     parser = argparse.ArgumentParser(description="Pretrain French Gemma 3")
     parser.add_argument(
         "--config",
@@ -32,13 +36,70 @@ def main() -> None:
         default="configs/mlx_config.yaml",
         help="Path to YAML configuration file",
     )
-    parser.add_argument(
-        "--data-cache-dir",
-        type=str,
-        default=None,
-        help="Path to directory for caching tokenized data binary",
-    )
-    args = parser.parse_args()
+
+    # Dynamically add all fields of TrainingConfig as command line arguments
+    for f in dataclasses.fields(TrainingConfig):
+        if f.name == "freeze_schedule":
+            continue
+
+        arg_name = f"--{f.name.replace('_', '-')}"
+        
+        # Resolve field type for Optionals
+        field_type = f.type
+        origin = get_origin(field_type)
+        if origin is Union:
+            args_of_union = get_args(field_type)
+            non_none_types = [t for t in args_of_union if t is not type(None)]
+            if non_none_types:
+                field_type = non_none_types[0]
+
+        kwargs: dict[str, Any] = {
+            "type": field_type,
+            "default": None,
+            "help": f"Override {f.name} (default from config/dataclass)",
+        }
+
+        # Specially handle bool type
+        if field_type is bool:
+            def str_to_bool(val: str) -> bool:
+                if isinstance(val, bool):
+                    return val
+                if val.lower() in ('yes', 'true', 't', 'y', '1'):
+                    return True
+                elif val.lower() in ('no', 'false', 'f', 'n', '0'):
+                    return False
+                raise argparse.ArgumentTypeError('Boolean value expected.')
+            kwargs["type"] = str_to_bool
+
+        parser.add_argument(arg_name, **kwargs)
+
+    # Parse arguments
+    args = parser.parse_args(args_list)
+
+    # Load from config file if exists
+    if args.config and os.path.exists(args.config):
+        config = TrainingConfig.from_yaml(args.config)
+    else:
+        logger.warning(
+            f"Configuration file '{args.config}' not found or not specified. "
+            "Using default TrainingConfig."
+        )
+        config = TrainingConfig()
+
+    # Override config with any CLI arguments explicitly passed (i.e. not None)
+    for f in dataclasses.fields(TrainingConfig):
+        if f.name == "freeze_schedule":
+            continue
+        val = getattr(args, f.name, None)
+        if val is not None:
+            setattr(config, f.name, val)
+
+    return config
+
+
+def main() -> None:
+    # 1. Parse configuration and overrides
+    config = parse_and_load_config()
 
     # 2. Check if running under torchrun/DDP
     is_distributed = "WORLD_SIZE" in os.environ
@@ -65,13 +126,10 @@ def main() -> None:
         level=log_level,
     )
 
-    # 3. Load configuration
-    config = TrainingConfig.from_yaml(args.config)
-    if args.data_cache_dir is not None:
-        config.data_cache_dir = args.data_cache_dir
     if not is_distributed:
         device = config.device
-    logger.info(f"Loaded config from {args.config}. Device target: {device} | Distributed: {is_distributed}")
+    logger.info(f"Loaded config. Device target: {device} | Distributed: {is_distributed}")
+
 
     # Set directories and cache paths
     tokenizer_dir = os.path.join(config.data_cache_dir, "tokenizer_checkpoint")
@@ -185,12 +243,21 @@ def main() -> None:
             find_unused_parameters=True,
         )
 
+    # Compile the model if compile option is enabled
+    if config.compile:
+        logger.info("Compiling model (torch.compile)...")
+        model = torch.compile(model)  # type: ignore[assignment]
+
     # 9. Configure Optimizer, Scheduler, and FreezeManager
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
     lr_scheduler = get_cosine_warmup_scheduler(optimizer, warmup_steps=config.warmup_steps, T_0=1000)
     
     # Extract raw model for FreezeManager
-    raw_model = model.module if isinstance(model, DistributedDataParallel) else model
+    raw_model: torch.nn.Module = model
+    if config.compile:
+        raw_model = getattr(model, "_orig_mod", model)
+    if isinstance(raw_model, DistributedDataParallel):
+        raw_model = raw_model.module
     freeze_manager = FreezeManager(raw_model, config.freeze_schedule)
 
     # 10. Instantiate Pretrainer
@@ -205,17 +272,25 @@ def main() -> None:
         device=device,
         amp_enabled=config.amp_enabled,
         amp_dtype=config.amp_dtype,
+        grad_accum_steps=config.gradient_accumulation_steps,
+        log_interval=config.log_interval,
+        eval_interval=config.eval_interval,
+        save_interval=config.save_interval,
         output_dir=config.output_dir,
         tb_log_dir=config.tb_log_dir,
-        log_interval=10,
-        eval_interval=50,
-        save_interval=100,
+        max_eval_batches=config.max_eval_batches,
+        max_checkpoints=config.max_checkpoints,
+        max_steps=config.max_steps,
+        repetition_penalty=config.repetition_penalty,
     )
 
     # 11. Run pretraining loop (mocking 3 epochs for training run example)
     logger.info(f"Rank {rank} starting pretraining loop...")
     global_step = 0
     for epoch in range(3):
+        if global_step >= config.max_steps:
+            logger.info(f"Reached max steps: {global_step} >= {config.max_steps}. Stopping pretraining.")
+            break
         logger.info(f"--- Starting Epoch {epoch} ---")
         global_step = trainer.train_epoch(epoch=epoch, global_step=global_step)
 

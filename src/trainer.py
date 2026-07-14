@@ -22,10 +22,15 @@ logger = logging.getLogger(__name__)
 
 
 def generate_text(
-    model: nn.Module, tokenizer: PreTrainedTokenizerFast, prompt: str, max_new_tokens: int = 30, device: str = "cpu"
+    model: nn.Module,
+    tokenizer: PreTrainedTokenizerFast,
+    prompt: str,
+    max_new_tokens: int = 30,
+    device: str = "cpu",
+    repetition_penalty: float = 1.0,
 ) -> str:
     """
-    Autoregressively generates text from a prompt using greedy decoding.
+    Autoregressively generates text from a prompt using greedy decoding, optionally applying a repetition penalty.
     """
     model.eval()
     input_ids = tokenizer.encode(prompt, add_special_tokens=True)
@@ -41,7 +46,17 @@ def generate_text(
     for _ in range(max_new_tokens):
         with torch.no_grad():
             outputs = model(input_ids_tensor)
-            next_token_logits = outputs.logits[:, -1, :]
+            next_token_logits = outputs.logits[:, -1, :].clone()
+
+            if repetition_penalty != 1.0:
+                # Apply repetition penalty
+                for token_id in set(input_ids_tensor[0].tolist()):
+                    val = next_token_logits[0, token_id].item()
+                    if val > 0:
+                        next_token_logits[0, token_id] /= repetition_penalty
+                    else:
+                        next_token_logits[0, token_id] *= repetition_penalty
+
             next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
             input_ids_tensor = torch.cat([input_ids_tensor, next_token], dim=-1)
 
@@ -81,6 +96,8 @@ class Pretrainer:
         tb_log_dir: str = "./runs",
         max_eval_batches: Optional[int] = 20,
         max_checkpoints: int = 5,
+        max_steps: Optional[int] = None,
+        repetition_penalty: float = 1.0,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -99,6 +116,8 @@ class Pretrainer:
         self.output_dir = output_dir
         self.max_eval_batches = max_eval_batches
         self.max_checkpoints = max_checkpoints
+        self.max_steps = max_steps
+        self.repetition_penalty = repetition_penalty
         self.periodic_checkpoints: List[str] = []
 
         # Setup AMP dtype
@@ -202,6 +221,10 @@ class Pretrainer:
 
                 global_step += 1
 
+                if self.max_steps is not None and global_step >= self.max_steps:
+                    logger.info(f"Reached max steps: {global_step} >= {self.max_steps}. Stopping epoch early.")
+                    break
+
                 # Logging to console & TensorBoard
                 if global_step % self.log_interval == 0:
                     current_lr = self.optimizer.param_groups[0]["lr"]
@@ -301,7 +324,14 @@ class Pretrainer:
 
         # Test generation
         sample_prompt = "Le français est"
-        generated = generate_text(self.model, self.tokenizer, sample_prompt, max_new_tokens=20, device=self.device)
+        generated = generate_text(
+            self.model,
+            self.tokenizer,
+            sample_prompt,
+            max_new_tokens=20,
+            device=self.device,
+            repetition_penalty=self.repetition_penalty,
+        )
         if self.is_main_process:
             logger.info(f"Sample generation: '{generated}'")
 

@@ -276,3 +276,58 @@ def test_periodic_checkpoint_rotation():
         assert "checkpoint-step-200" in chkpts
         assert "checkpoint-step-300" in chkpts
         trainer.close()
+
+
+def test_generate_text_repetition_penalty():
+    class MockTokenizer:
+        bos_token_id = 1
+        eos_token_id = 2
+        pad_token_id = 0
+
+        def encode(self, text, add_special_tokens=True):
+            return [5]
+
+        def decode(self, ids, skip_special_tokens=True):
+            return " ".join(str(i) for i in ids)
+
+    class MockModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(10, 10)
+
+        def forward(self, input_ids, attention_mask=None, labels=None):
+            local_logits = torch.zeros(input_ids.shape[0], input_ids.shape[1], 10)
+            local_logits[:, -1, 5] = 10.0
+            local_logits[:, -1, 6] = 8.0
+            
+            class Outputs:
+                pass
+            out = Outputs()
+            out.logits = local_logits
+            return out
+
+    model = MockModel()
+    tokenizer = MockTokenizer()
+
+    # 1. No repetition penalty (repetition_penalty=1.0)
+    generated_no_penalty = generate_text(
+        model=model,
+        tokenizer=tokenizer,
+        prompt="start",
+        max_new_tokens=3,
+        device="cpu",
+        repetition_penalty=1.0,
+    )
+    assert generated_no_penalty == "5 5 5 5"
+
+    # 2. With repetition penalty (repetition_penalty=1.5)
+    generated_with_penalty = generate_text(
+        model=model,
+        tokenizer=tokenizer,
+        prompt="start",
+        max_new_tokens=1,
+        device="cpu",
+        repetition_penalty=1.5,
+    )
+    assert generated_with_penalty == "5 6"
+
