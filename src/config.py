@@ -42,6 +42,7 @@ class TrainingConfig:
     embedding_noise_std: float = 0.0
     max_eval_batches: int = 20
     max_checkpoints: int = 5
+    repetition_penalty: float = 1.2
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "TrainingConfig":

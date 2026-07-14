@@ -281,6 +281,7 @@ def main() -> None:
         max_eval_batches=config.max_eval_batches,
         max_checkpoints=config.max_checkpoints,
         max_steps=config.max_steps,
+        repetition_penalty=config.repetition_penalty,
     )
 
     # 11. Run pretraining loop (mocking 3 epochs for training run example)

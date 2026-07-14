@@ -97,6 +97,7 @@ class Pretrainer:
         max_eval_batches: Optional[int] = 20,
         max_checkpoints: int = 5,
         max_steps: Optional[int] = None,
+        repetition_penalty: float = 1.0,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -116,6 +117,7 @@ class Pretrainer:
         self.max_eval_batches = max_eval_batches
         self.max_checkpoints = max_checkpoints
         self.max_steps = max_steps
+        self.repetition_penalty = repetition_penalty
         self.periodic_checkpoints: List[str] = []
 
         # Setup AMP dtype
@@ -322,7 +324,14 @@ class Pretrainer:
 
         # Test generation
         sample_prompt = "Le français est"
-        generated = generate_text(self.model, self.tokenizer, sample_prompt, max_new_tokens=20, device=self.device)
+        generated = generate_text(
+            self.model,
+            self.tokenizer,
+            sample_prompt,
+            max_new_tokens=20,
+            device=self.device,
+            repetition_penalty=self.repetition_penalty,
+        )
         if self.is_main_process:
             logger.info(f"Sample generation: '{generated}'")
 
