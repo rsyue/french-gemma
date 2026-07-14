@@ -243,12 +243,21 @@ def main() -> None:
             find_unused_parameters=True,
         )
 
+    # Compile the model if compile option is enabled
+    if config.compile:
+        logger.info("Compiling model (torch.compile)...")
+        model = torch.compile(model)  # type: ignore[assignment]
+
     # 9. Configure Optimizer, Scheduler, and FreezeManager
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
     lr_scheduler = get_cosine_warmup_scheduler(optimizer, warmup_steps=config.warmup_steps, T_0=1000)
     
     # Extract raw model for FreezeManager
-    raw_model = model.module if isinstance(model, DistributedDataParallel) else model
+    raw_model: torch.nn.Module = model
+    if config.compile:
+        raw_model = getattr(model, "_orig_mod", model)
+    if isinstance(raw_model, DistributedDataParallel):
+        raw_model = raw_model.module
     freeze_manager = FreezeManager(raw_model, config.freeze_schedule)
 
     # 10. Instantiate Pretrainer
@@ -263,17 +272,24 @@ def main() -> None:
         device=device,
         amp_enabled=config.amp_enabled,
         amp_dtype=config.amp_dtype,
+        grad_accum_steps=config.gradient_accumulation_steps,
+        log_interval=config.log_interval,
+        eval_interval=config.eval_interval,
+        save_interval=config.save_interval,
         output_dir=config.output_dir,
         tb_log_dir=config.tb_log_dir,
-        log_interval=10,
-        eval_interval=50,
-        save_interval=100,
+        max_eval_batches=config.max_eval_batches,
+        max_checkpoints=config.max_checkpoints,
+        max_steps=config.max_steps,
     )
 
     # 11. Run pretraining loop (mocking 3 epochs for training run example)
     logger.info(f"Rank {rank} starting pretraining loop...")
     global_step = 0
     for epoch in range(3):
+        if global_step >= config.max_steps:
+            logger.info(f"Reached max steps: {global_step} >= {config.max_steps}. Stopping pretraining.")
+            break
         logger.info(f"--- Starting Epoch {epoch} ---")
         global_step = trainer.train_epoch(epoch=epoch, global_step=global_step)
 

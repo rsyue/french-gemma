@@ -81,6 +81,7 @@ class Pretrainer:
         tb_log_dir: str = "./runs",
         max_eval_batches: Optional[int] = 20,
         max_checkpoints: int = 5,
+        max_steps: Optional[int] = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -99,6 +100,7 @@ class Pretrainer:
         self.output_dir = output_dir
         self.max_eval_batches = max_eval_batches
         self.max_checkpoints = max_checkpoints
+        self.max_steps = max_steps
         self.periodic_checkpoints: List[str] = []
 
         # Setup AMP dtype
@@ -201,6 +203,10 @@ class Pretrainer:
                     self.lr_scheduler.step()
 
                 global_step += 1
+
+                if self.max_steps is not None and global_step >= self.max_steps:
+                    logger.info(f"Reached max steps: {global_step} >= {self.max_steps}. Stopping epoch early.")
+                    break
 
                 # Logging to console & TensorBoard
                 if global_step % self.log_interval == 0:
