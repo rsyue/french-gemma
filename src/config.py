@@ -50,8 +50,20 @@ class TrainingConfig:
         with open(yaml_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
 
+        if not data or not isinstance(data, dict):
+            data = {}
+
         # Parse freeze schedule keys as integers
         if "freeze_schedule" in data and data["freeze_schedule"] is not None:
             data["freeze_schedule"] = {int(k): list(v) for k, v in data["freeze_schedule"].items()}
 
-        return cls(**data)
+        # Filter out keys with None values and ignore any keys that are not valid fields
+        import inspect
+        valid_keys = inspect.signature(cls).parameters.keys()
+        filtered_data = {
+            k: v for k, v in data.items()
+            if k in valid_keys and v is not None
+        }
+
+        return cls(**filtered_data)
+

@@ -3,9 +3,10 @@ Pretraining Script for French Gemma 3 supporting Single-GPU, MPS, and Multi-GPU 
 """
 
 import argparse
+import dataclasses
 import logging
 import os
-from typing import Optional
+from typing import Any, List, Optional, Union, get_args, get_origin
 
 import numpy as np
 import torch
@@ -23,8 +24,11 @@ from src.trainer import Pretrainer
 logger = logging.getLogger(__name__)
 
 
-def main() -> None:
-    # 1. Parse command line arguments
+def parse_and_load_config(args_list: Optional[List[str]] = None) -> TrainingConfig:
+    """
+    Parses CLI overrides dynamically based on TrainingConfig fields,
+    merges them with YAML configuration values, and uses defaults if not present.
+    """
     parser = argparse.ArgumentParser(description="Pretrain French Gemma 3")
     parser.add_argument(
         "--config",
@@ -32,13 +36,70 @@ def main() -> None:
         default="configs/mlx_config.yaml",
         help="Path to YAML configuration file",
     )
-    parser.add_argument(
-        "--data-cache-dir",
-        type=str,
-        default=None,
-        help="Path to directory for caching tokenized data binary",
-    )
-    args = parser.parse_args()
+
+    # Dynamically add all fields of TrainingConfig as command line arguments
+    for f in dataclasses.fields(TrainingConfig):
+        if f.name == "freeze_schedule":
+            continue
+
+        arg_name = f"--{f.name.replace('_', '-')}"
+        
+        # Resolve field type for Optionals
+        field_type = f.type
+        origin = get_origin(field_type)
+        if origin is Union:
+            args_of_union = get_args(field_type)
+            non_none_types = [t for t in args_of_union if t is not type(None)]
+            if non_none_types:
+                field_type = non_none_types[0]
+
+        kwargs: dict[str, Any] = {
+            "type": field_type,
+            "default": None,
+            "help": f"Override {f.name} (default from config/dataclass)",
+        }
+
+        # Specially handle bool type
+        if field_type is bool:
+            def str_to_bool(val: str) -> bool:
+                if isinstance(val, bool):
+                    return val
+                if val.lower() in ('yes', 'true', 't', 'y', '1'):
+                    return True
+                elif val.lower() in ('no', 'false', 'f', 'n', '0'):
+                    return False
+                raise argparse.ArgumentTypeError('Boolean value expected.')
+            kwargs["type"] = str_to_bool
+
+        parser.add_argument(arg_name, **kwargs)
+
+    # Parse arguments
+    args = parser.parse_args(args_list)
+
+    # Load from config file if exists
+    if args.config and os.path.exists(args.config):
+        config = TrainingConfig.from_yaml(args.config)
+    else:
+        logger.warning(
+            f"Configuration file '{args.config}' not found or not specified. "
+            "Using default TrainingConfig."
+        )
+        config = TrainingConfig()
+
+    # Override config with any CLI arguments explicitly passed (i.e. not None)
+    for f in dataclasses.fields(TrainingConfig):
+        if f.name == "freeze_schedule":
+            continue
+        val = getattr(args, f.name, None)
+        if val is not None:
+            setattr(config, f.name, val)
+
+    return config
+
+
+def main() -> None:
+    # 1. Parse configuration and overrides
+    config = parse_and_load_config()
 
     # 2. Check if running under torchrun/DDP
     is_distributed = "WORLD_SIZE" in os.environ
@@ -65,13 +126,10 @@ def main() -> None:
         level=log_level,
     )
 
-    # 3. Load configuration
-    config = TrainingConfig.from_yaml(args.config)
-    if args.data_cache_dir is not None:
-        config.data_cache_dir = args.data_cache_dir
     if not is_distributed:
         device = config.device
-    logger.info(f"Loaded config from {args.config}. Device target: {device} | Distributed: {is_distributed}")
+    logger.info(f"Loaded config. Device target: {device} | Distributed: {is_distributed}")
+
 
     # Set directories and cache paths
     tokenizer_dir = os.path.join(config.data_cache_dir, "tokenizer_checkpoint")
