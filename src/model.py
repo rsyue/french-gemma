@@ -33,7 +33,7 @@ class FrenchGemmaModel(nn.Module):
 
         # Load blank config
         self.config = AutoConfig.from_pretrained(model_id)
-        self.config.torch_dtype = torch.float32
+        self.config.dtype = torch.float32
 
         # Update vocabulary size based on custom tokenizer
         self.config.vocab_size = vocab_size

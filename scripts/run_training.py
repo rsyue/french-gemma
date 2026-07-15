@@ -101,6 +101,10 @@ def main() -> None:
     # 1. Parse configuration and overrides
     config = parse_and_load_config()
 
+    # Enable TensorFloat32 (TF32) tensor cores for float32 matrix multiplications if CUDA is available
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision("high")
+
     # 2. Check if running under torchrun/DDP
     is_distributed = "WORLD_SIZE" in os.environ
     if is_distributed:
