@@ -19,10 +19,12 @@ Examples:
   ```
 
 ## Installing Dependencies
-To install any new packages, use the `uv` tool within the active virtual environment:
+To install or manage any packages, always use the `uv pip` command within the active virtual environment:
 ```bash
 source .venv/bin/activate && uv pip install <dependency_name>
 ```
+Do not use bare `pip` commands; instead, always run them as `uv pip`.
+
 
 ## Continuous Integration (CI)
 When running CI checks, always run both the linter and the test suite:

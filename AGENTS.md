@@ -6,6 +6,7 @@ Welcome, agent! This document contains critical guidelines, architecture pattern
 
 ## 1. Environment & Commands Enforcements
 *   **Virtual Environment**: You **MUST** run all python/pytest/ruff/mypy commands using `source .venv/bin/activate && <command>`.
+*   **Pip Commands**: Any pip command must be run as `uv pip` (e.g., `source .venv/bin/activate && uv pip ...`).
 *   **Testing**: Before submitting or presenting changes, ensure all tests pass:
     ```bash
     source .venv/bin/activate && pytest tests/
