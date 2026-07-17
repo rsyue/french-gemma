@@ -40,3 +40,16 @@ def test_config_from_yaml():
         config = TrainingConfig.from_yaml(config_path)
         assert config.max_eval_batches == 15
         assert config.max_checkpoints == 8
+
+
+def test_all_repo_configs():
+    config_dir = "configs"
+    assert os.path.exists(config_dir)
+    yaml_files = [f for f in os.listdir(config_dir) if f.endswith(".yaml")]
+    assert len(yaml_files) > 0
+    for filename in yaml_files:
+        path = os.path.join(config_dir, filename)
+        config = TrainingConfig.from_yaml(path)
+        assert config is not None
+        assert isinstance(config.model_id, str)
+

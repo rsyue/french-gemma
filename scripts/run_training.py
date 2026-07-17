@@ -356,8 +356,13 @@ def main() -> None:
         logger.info(f"--- Starting Epoch {epoch} ---")
         global_step = trainer.train_epoch(epoch=epoch, global_step=global_step)
 
+    logger.info(f"Rank {rank} saving final checkpoint...")
+    final_checkpoint_path = os.path.join(config.output_dir, "checkpoint-final")
+    trainer.save_checkpoint_dir(final_checkpoint_path, global_step, {"loss": trainer.latest_train_loss})
+
     logger.info(f"Rank {rank} pretraining run completed successfully!")
     trainer.close()
+
 
     # 12. Cleanup process group
     if is_distributed:

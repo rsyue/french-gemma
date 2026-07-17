@@ -348,6 +348,71 @@ class Pretrainer:
 
         return perplexity
 
+    def save_checkpoint_dir(self, checkpoint_path: str, global_step: int, metrics: Dict[str, Any]) -> None:
+        """
+        Saves a Hugging Face compatible checkpoint directory containing the model weights,
+        configuration, tokenizer files, and training state.
+        """
+        if not self.is_main_process:
+            return
+
+        os.makedirs(checkpoint_path, exist_ok=True)
+
+        # Extract raw model (unwrap compile and DDP)
+        raw_model: Any = self.model
+        if hasattr(raw_model, "_orig_mod"):
+            raw_model = raw_model._orig_mod
+        if isinstance(raw_model, nn.parallel.DistributedDataParallel):
+            raw_model = raw_model.module
+
+
+        # Ensure the raw model config architectures is set to Gemma3ForCausalLM
+        if hasattr(raw_model, "config") and raw_model.config is not None:
+            raw_model.config.architectures = ["Gemma3ForCausalLM"]
+            
+            # Adjust layer_types to avoid validation failure in mock models
+            num_layers = getattr(raw_model.config, "num_hidden_layers", None)
+            layer_types = getattr(raw_model.config, "layer_types", None)
+            if num_layers is not None and layer_types is not None and len(layer_types) != num_layers:
+                if len(layer_types) > num_layers:
+                    raw_model.config.layer_types = layer_types[:num_layers]
+                else:
+                    default_type = layer_types[-1] if layer_types else "full_attention"
+                    raw_model.config.layer_types = list(layer_types) + [default_type] * (num_layers - len(layer_types))
+            
+            try:
+                raw_model.config.save_pretrained(checkpoint_path)
+            except Exception as e:
+                logger.warning(f"Failed to save Hugging Face config: {e}")
+                # Save as standard dict fallback
+                try:
+                    import json
+                    with open(os.path.join(checkpoint_path, "config.json"), "w") as f:
+                        json.dump(raw_model.config.to_dict(), f, indent=2)
+                except Exception as e2:
+                    logger.warning(f"Failed to save fallback config.json: {e2}")
+
+        # Save weights
+        weights_path = os.path.join(checkpoint_path, "pytorch_model.bin")
+        torch.save(raw_model.state_dict(), weights_path)
+
+        # Save tokenizer if available
+        if self.tokenizer is not None and hasattr(self.tokenizer, "save_pretrained"):
+            self.tokenizer.save_pretrained(checkpoint_path)
+
+
+        # Save training state (optimizer, scheduler, metrics)
+        training_state = {
+            "global_step": global_step,
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "metrics": metrics,
+        }
+        if self.lr_scheduler is not None:
+            training_state["lr_scheduler_state_dict"] = self.lr_scheduler.state_dict()
+
+        torch.save(training_state, os.path.join(checkpoint_path, "training_state.pt"))
+        logger.info(f"Hugging Face compatible checkpoint directory saved at: {checkpoint_path}")
+
     def save_best_perplexity_checkpoint(self, global_step: int, perplexity: float) -> None:
         """
         Saves a checkpoint and retains only the 2 best checkpoints based on perplexity.
@@ -374,21 +439,13 @@ class Pretrainer:
                             shutil.rmtree(worst_path)
                         else:
                             os.remove(worst_path)
-                        logger.info(f"Removed worst perplexity checkpoint file: {worst_path}")
+                        logger.info(f"Removed worst perplexity checkpoint: {worst_path}")
                     except Exception as e:
                         logger.warning(f"Failed to delete checkpoint {worst_path}: {e}")
                 self.best_ppl_checkpoints.remove(worst)
 
         if should_save:
-            torch.save(
-                {
-                    "global_step": global_step,
-                    "model_state_dict": self.model.state_dict(),
-                    "optimizer_state_dict": self.optimizer.state_dict(),
-                    "perplexity": perplexity,
-                },
-                checkpoint_path,
-            )
+            self.save_checkpoint_dir(checkpoint_path, global_step, {"perplexity": perplexity})
             self.best_ppl_checkpoints.append({"path": checkpoint_path, "perplexity": perplexity})
             logger.info(f"Saved new best perplexity checkpoint: {checkpoint_path}")
         else:
@@ -420,21 +477,13 @@ class Pretrainer:
                             shutil.rmtree(worst_path)
                         else:
                             os.remove(worst_path)
-                        logger.info(f"Removed worst training loss checkpoint file: {worst_path}")
+                        logger.info(f"Removed worst training loss checkpoint: {worst_path}")
                     except Exception as e:
                         logger.warning(f"Failed to delete checkpoint {worst_path}: {e}")
                 self.best_loss_checkpoints.remove(worst)
 
         if should_save:
-            torch.save(
-                {
-                    "global_step": global_step,
-                    "model_state_dict": self.model.state_dict(),
-                    "optimizer_state_dict": self.optimizer.state_dict(),
-                    "loss": train_loss,
-                },
-                checkpoint_path,
-            )
+            self.save_checkpoint_dir(checkpoint_path, global_step, {"loss": train_loss})
             self.best_loss_checkpoints.append({"path": checkpoint_path, "loss": train_loss})
             logger.info(f"Saved new best training loss checkpoint: {checkpoint_path}")
         else:
@@ -455,16 +504,9 @@ class Pretrainer:
 
         checkpoint_name = f"checkpoint-step-{global_step}"
         checkpoint_path = os.path.join(self.output_dir, checkpoint_name)
-        torch.save(
-            {
-                "global_step": global_step,
-                "model_state_dict": self.model.state_dict(),
-                "optimizer_state_dict": self.optimizer.state_dict(),
-                "perplexity": perplexity,
-            },
-            checkpoint_path,
-        )
+        self.save_checkpoint_dir(checkpoint_path, global_step, {"perplexity": perplexity})
         logger.info(f"Saved periodic checkpoint: {checkpoint_path}")
+
 
         self.periodic_checkpoints.append(checkpoint_path)
         if len(self.periodic_checkpoints) > self.max_checkpoints:
