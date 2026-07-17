@@ -69,3 +69,41 @@ def test_parse_and_load_config_cli_overrides():
         assert config.compile is True
         # Fields not specified in CLI or YAML should still have dataclass defaults
         assert config.batch_size == 2
+
+
+def test_prepare_and_pack_data():
+    import numpy as np
+
+    from src.dataset import train_custom_tokenizer
+
+    mock_texts = [
+        "Texte un de test.",
+        "Deuxième texte de test.",
+        "Troisième exemple en français.",
+        "Un dernier texte."
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Train tokenizer
+        tok_dir = os.path.join(tmpdir, "tok")
+        tokenizer = train_custom_tokenizer(mock_texts, vocab_size=100, save_dir=tok_dir)
+        
+        # Output cache path
+        cache_path = os.path.join(tmpdir, "packed.bin")
+        
+        # Call the prepare_and_pack_data function (with batch size of 2, log interval of 1)
+        run_training.prepare_and_pack_data(
+            texts=mock_texts,
+            tokenizer=tokenizer,
+            cache_path=cache_path,
+            packing_batch_size=2,
+            packing_log_interval=1,
+        )
+        
+        # Assert the file exists and is not empty
+        assert os.path.exists(cache_path)
+        assert os.path.getsize(cache_path) > 0
+        
+        # Read back the cached tokens and verify
+        data = np.fromfile(cache_path, dtype=np.uint32)
+        assert len(data) > 0
+

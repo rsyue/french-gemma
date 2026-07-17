@@ -48,14 +48,24 @@ def main() -> None:
 
         messages = [{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": prompt}]
 
-        inputs_any: Any = tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_dict=True,
-            return_tensors="pt",
-        )
-        inputs = inputs_any.to(model.device)
+        # Check if chat template is available, fallback to direct tokenization if not
+        try:
+            has_template = tokenizer.chat_template is not None
+        except Exception:
+            has_template = False
+
+        if has_template:
+            inputs_any: Any = tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_dict=True,
+                return_tensors="pt",
+            )
+            inputs = inputs_any.to(model.device)
+        else:
+            inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+
         with torch.autocast(device_type=str(model.device), dtype=dtype):
             with torch.inference_mode():
                 _ = model.generate(**inputs, streamer=streamer, max_new_tokens=(max_len - inputs.input_ids.shape[1]))

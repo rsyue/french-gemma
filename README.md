@@ -2,7 +2,7 @@
 
 A modular, extensible PyTorch library to train a blank `Gemma 3` model (default architecture: `google/gemma-3-270m-it`) from scratch on unsupervised French data using HuggingFace `transformers` configurations, custom byte-level tokenizers, and PyTorch training optimization loops.
 
-This project implements architectures and practices from the **Gemma 3 Paper**: [Gemma 3: Open Models Built with Google's Gemini Technology (Google DeepMind, 2024)](https://arxiv.org/abs/2412.00000).
+This project implements architectures and practices from the **Gemma 3 Paper**: [Gemma 3: Open Models Built with Google's Gemini Technology (Google DeepMind, 2024)](https://arxiv.org/abs/2503.19786).
 
 ---
 
