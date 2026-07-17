@@ -43,6 +43,9 @@ class TrainingConfig:
     max_eval_batches: int = 20
     max_checkpoints: int = 5
     repetition_penalty: float = 1.2
+    packing_batch_size: int = 10000
+    packing_log_interval: int = 10
+
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "TrainingConfig":

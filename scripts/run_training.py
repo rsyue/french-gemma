@@ -97,7 +97,76 @@ def parse_and_load_config(args_list: Optional[List[str]] = None) -> TrainingConf
     return config
 
 
+def prepare_and_pack_data(
+    texts: List[str],
+    tokenizer: PreTrainedTokenizerFast,
+    cache_path: str,
+    packing_batch_size: int = 10000,
+    packing_log_interval: int = 10,
+) -> None:
+    """
+    Tokenizes and packs texts into a binary cache file using batching to limit memory usage.
+    """
+    logger.info("Packing tokens and generating binary cache file...")
+    bos_id = tokenizer.bos_token_id
+    eos_id = tokenizer.eos_token_id
+
+    valid_texts = [t for t in texts if t.strip()]
+    total_texts = len(valid_texts)
+    
+    if total_texts == 0:
+        logger.warning("No non-empty texts to pack.")
+        # Create empty file to avoid PackedTextDataset complaining it doesn't exist
+        open(cache_path, "wb").close()
+        return
+
+    total_batches = (total_texts + packing_batch_size - 1) // packing_batch_size
+    
+    logger.info(
+        f"Total non-empty documents to pack: {total_texts} "
+        f"(divided into {total_batches} batches of size {packing_batch_size})"
+    )
+
+
+    with open(cache_path, "wb") as f:
+        for batch_idx in range(total_batches):
+            batch_start = batch_idx * packing_batch_size
+            batch_end = min(batch_start + packing_batch_size, total_texts)
+            text_batch = valid_texts[batch_start:batch_end]
+            
+            # Batch encode the texts
+            batch_encoded = tokenizer(
+                text_batch,
+                add_special_tokens=False,
+            )["input_ids"]
+
+            
+            # Accumulate all tokens for this batch
+            all_tokens = []
+            for doc_ids in batch_encoded:
+                doc_with_special = []
+                if bos_id is not None:
+                    doc_with_special.append(bos_id)
+                doc_with_special.extend(doc_ids)
+                if eos_id is not None:
+                    doc_with_special.append(eos_id)
+                all_tokens.extend(doc_with_special)
+            
+            if all_tokens:
+                arr = np.array(all_tokens, dtype=np.uint32)
+                f.write(arr.tobytes())
+            
+            # Announce progress
+            if (batch_idx + 1) % packing_log_interval == 0 or (batch_idx + 1) == total_batches:
+                progress_pct = ((batch_idx + 1) / total_batches) * 100
+                logger.info(
+                    f"Packing progress: Batch {batch_idx + 1}/{total_batches} "
+                    f"({progress_pct:.2f}%) - Processed {batch_end}/{total_texts} texts."
+                )
+
+
 def main() -> None:
+
     # 1. Parse configuration and overrides
     config = parse_and_load_config()
 
@@ -162,26 +231,15 @@ def main() -> None:
         logger.info("Training custom ByteLevelBPETokenizer on main process...")
         tokenizer = train_custom_tokenizer(texts, vocab_size=1000, save_dir=tokenizer_dir)
 
-        # Create packed sequences by streaming tokenization directly to the binary cache file on disk
-        logger.info("Packing tokens and generating binary cache file on main process...")
-        bos_id = tokenizer.bos_token_id
-        eos_id = tokenizer.eos_token_id
+        # Create packed sequences by batching tokenization directly to the binary cache file on disk
+        prepare_and_pack_data(
+            texts=texts,
+            tokenizer=tokenizer,
+            cache_path=cache_path,
+            packing_batch_size=config.packing_batch_size,
+            packing_log_interval=config.packing_log_interval,
+        )
 
-        with open(cache_path, "wb") as f:
-            for text in texts:
-                if not text.strip():
-                    continue
-                tokens = tokenizer.encode(text, add_special_tokens=False)
-                doc_ids = []
-                if bos_id is not None:
-                    doc_ids.append(bos_id)
-                doc_ids.extend(tokens)
-                if eos_id is not None:
-                    doc_ids.append(eos_id)
-                
-                arr = np.array(doc_ids, dtype=np.uint32)
-                f.write(arr.tobytes())
-        logger.info(f"Main process finished data prep. Cached packed binary to {cache_path}")
 
     # 5. Barrier synchronization for workers
     if is_distributed:
