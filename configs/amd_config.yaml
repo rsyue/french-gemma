@@ -2,9 +2,9 @@ model_id: "google/gemma-3-270m-it"
 dataset_path: "wikimedia/wikipedia"
 dataset_name: "20231101.fr"
 device: "cuda"
-max_sequence_length: 8192
-batch_size: 32
-gradient_accumulation_steps: 8
+max_sequence_length: 2048
+batch_size: 4
+gradient_accumulation_steps: 16
 learning_rate: 3.0e-4
 weight_decay: 0.01
 warmup_steps: 500
@@ -17,10 +17,7 @@ save_interval: 1000
 eval_interval: 200
 num_workers: 8
 prefetch_factor: 2
-freeze_schedule:
-  0: [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
-  5000: [12, 13, 14, 15, 16, 17]
-  10000: []
 embedding_noise_std: 0.05
 pin_memory: true
-
+vocab_size: 250000
+num_examples: 100

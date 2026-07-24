@@ -48,8 +48,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Validate GPU count choice
-if [ "$GPUS" -ne 2 ] && [ "$GPUS" -ne 4 ]; then
-    echo "Error: This example script supports running with 2 or 4 GPUs."
+if [ "$GPUS" -lt 1 ]; then
+    echo "Error: GPU count must be at least 1."
     exit 1
 fi
 
@@ -60,4 +60,4 @@ echo "Target GPUs: $GPUS"
 echo "=========================================================="
 
 # Run DDP pretraining
-torchrun --nproc_per_node="$GPUS" scripts/run_training.py --config "$CONFIG"
+torchrun --nproc_per_node="$GPUS" -m train.pretrain --config "$CONFIG"
