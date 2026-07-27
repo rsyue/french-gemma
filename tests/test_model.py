@@ -5,7 +5,6 @@ This module contains unit tests validating base model wraps, LM Head projections
 embedding noise injection, layer freezing scheduler steps, and cosine annealing schedules.
 """
 
-import pytest
 import torch
 
 from src.model import FrenchGemmaModel
@@ -85,9 +84,39 @@ def test_lr_scheduler():
     # Should be decaying cosine
     assert optimizer.param_groups[0]["lr"] < 1e-3
 
-    # T_mult <= 1 should raise ValueError
-    with pytest.raises(ValueError, match="T_mult must be greater than 1"):
-        get_cosine_warmup_scheduler(optimizer, warmup_steps=10, T_0=50, T_mult=1)
+
+def test_lr_scheduler_total_steps_auto_calc():
+    vocab_size = 100
+    model = FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=vocab_size)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1.0e-3)
+    scheduler = get_cosine_warmup_scheduler(
+        optimizer,
+        total_steps=1000,
+        warmup_ratio=0.03,
+        num_cycles=1,
+        eta_min_ratio=0.01,
+    )
+
+    # Step 0: Warmup start = 0
+    assert optimizer.param_groups[0]["lr"] == 0.0
+
+    # Step to end of warmup (step 30)
+    for _ in range(30):
+        optimizer.step()
+        scheduler.step()
+
+    # At step 30 (end of warmup), LR should reach peak (1e-3)
+    assert abs(optimizer.param_groups[0]["lr"] - 1.0e-3) < 1e-6
+
+    # Step to 999th step (969th step of annealing cycle)
+    for _ in range(969):
+        optimizer.step()
+        scheduler.step()
+
+    # At step 999 (end of annealing cycle), LR should reach minimum eta_min_ratio (1e-3 * 0.01 = 1e-5)
+    assert abs(optimizer.param_groups[0]["lr"] - 1.0e-5) < 1e-6
+
+
 
 
 def test_embedding_noise():

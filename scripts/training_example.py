@@ -161,7 +161,14 @@ def main() -> None:
         model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay
     )
     lr_scheduler = get_cosine_warmup_scheduler(
-        optimizer, warmup_steps=config.warmup_steps, T_0=1000
+        optimizer,
+        total_steps=config.max_steps,
+        warmup_steps=config.warmup_steps,
+        warmup_ratio=config.warmup_ratio,
+        T_0=config.T_0,
+        T_mult=config.T_mult,
+        num_cycles=config.num_cycles,
+        eta_min_ratio=config.eta_min_ratio,
     )
 
     raw_model: torch.nn.Module = model

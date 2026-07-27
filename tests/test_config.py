@@ -19,6 +19,11 @@ def test_config_defaults():
     assert config.max_checkpoints == 5
     assert config.data_cache_dir == "./data_cache"
     assert config.num_examples == "all"
+    assert config.warmup_ratio == 0.03
+    assert config.T_mult == 2
+    assert config.num_cycles == 1
+    assert config.eta_min_ratio == 0.01
+
 
 
 def test_config_custom_values():

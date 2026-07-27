@@ -8,7 +8,7 @@ hardware execution, datasets, tokenizer, optimization, and checkpoint settings.
 import inspect
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Union
 
 import yaml
 
@@ -24,8 +24,14 @@ class TrainingConfig:
     gradient_accumulation_steps: int = 8
     learning_rate: float = 1.0e-4
     weight_decay: float = 0.01
-    warmup_steps: int = 100
+    warmup_steps: Optional[int] = None
+    warmup_ratio: float = 0.03
+    T_0: Optional[int] = None
+    T_mult: int = 2
+    num_cycles: int = 1
+    eta_min_ratio: float = 0.01
     max_steps: int = 5000
+
     compile: bool = False
     amp_enabled: bool = True
     amp_dtype: str = "bfloat16"
