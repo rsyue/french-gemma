@@ -8,13 +8,14 @@ This project implements architectures and practices from the **Gemma 3 Paper**: 
 
 ## Key Features
 
-1.  **Decoder-Only Causal Training**: Configures and instantiates a blank Gemma 3 model, adding a PyTorch-native `nn.Linear` LM Head.
-2.  **Custom Tokenization**: Trains a local byte-level BPE tokenizer (`ByteLevelBPETokenizer`) from scratch to correctly handle French contractions, elisions (e.g. `l'`, `d'`), and accents. Uses **right padding** (`padding_side = "right"`) optimized for causal decoder training.
-3.  **Sliding Window Packing**: Packs token sequences separated by `<bos>` and `<eos>` tokens into fixed `max_sequence_length` inputs. Employs a sliding window with a 50-token overlap stride to prevent cutting important context.
-4.  **Gaussian Embedding Noise**: Introduces adjustable Gaussian noise (via `embedding_noise_std`) directly into word embeddings during training (NEFTune style) to boost generalization and robustness. Noise is bypassed automatically during evaluation.
-5.  **Freeze Schedules**: Dynamically freezes/unfreezes layers at configurable step thresholds to stabilize early pretraining.
-6.  **Advanced Training Loops**: Full support for mixed-precision (AMP) training, gradient accumulation, gradient clipping, AdamW optimizer, and Cosine Annealing with Warm Restarts and Warmup.
-7.  **Log & Checkpoint Management**: Reports progress to TensorBoard and retains only the **three best checkpoints** based on validation perplexity.
+1.  **Modular & Extensible Training Framework (`train/`)**: Core training features are decoupled into an extensible strategy/trainer hierarchy supporting dependency injection, protocol contracts, and custom training algorithms (e.g. pretraining, future RLHF/DPO extensions).
+2.  **Decoder-Only Causal Training**: Configures and instantiates a blank Gemma 3 model, adding a PyTorch-native `nn.Linear` LM Head.
+3.  **Custom Tokenization**: Trains a local byte-level BPE tokenizer (`ByteLevelBPETokenizer`) from scratch to correctly handle French contractions, elisions (e.g. `l'`, `d'`), and accents. Uses **right padding** (`padding_side = "right"`) optimized for causal decoder training.
+4.  **Sliding Window Packing**: Packs token sequences separated by `<bos>` and `<eos>` tokens into fixed `max_sequence_length` inputs using disk-backed binary cache packing.
+5.  **Gaussian Embedding Noise**: Introduces adjustable Gaussian noise (via `embedding_noise_std`) directly into word embeddings during training (NEFTune style) to boost generalization and robustness. Noise is bypassed automatically during evaluation.
+6.  **Un-frozen Pretraining by Default**: Runs pretraining without layer freezing by default for max model capacity (optional layer freezing schedules can still be configured).
+7.  **Advanced Training Loops**: Full support for mixed-precision (AMP) training, gradient accumulation, gradient clipping, AdamW optimizer, and Cosine Annealing with Warm Restarts and Warmup.
+8.  **Log & Checkpoint Management**: Reports progress to TensorBoard and retains only the **three best checkpoints** based on validation perplexity.
 
 ---
 
@@ -28,16 +29,25 @@ french_gemma/
 │   └── nvidia_config.yaml      # Nvidia Jetson Orin Nano (CUDA, float16)
 ├── hooks/
 │   └── README.md               # Developer environment commands and rules
+├── train/
+│   ├── __init__.py             # Package exports (BaseTrainer, TrainingFactory, PretrainStrategy)
+│   ├── base.py                 # Abstract base classes, protocols, and StrategyType unions
+│   ├── builder.py              # ModularTrainer and dependency injection TrainingFactory
+│   ├── cli.py                  # Dynamic CLI argument parser & TrainingConfig plumbing
+│   ├── pretrain.py             # CLI entrypoint executable via python -m train.pretrain
+│   └── strategies/
+│       ├── base.py             # AbstractTrainingStrategy base definition
+│       └── pretrain.py         # Causal Language Model pretraining strategy
+├── scripts/
+│   ├── run_ddp.sh              # Multi-GPU launcher helper
+│   └── training_example.py     # Standalone simple training example script
 ├── src/
-│   ├── config.py               # YAML configuration parser
-│   ├── dataset.py              # Tokenizer, packed datasets, and Dataloaders
+│   ├── config.py               # YAML configuration parser and dataclass
+│   ├── dataset.py              # Tokenizer, dataset packing, and DataLoaders
 │   ├── model.py                # FrenchGemmaModel wrapper with LM head & noise injection
 │   ├── scheduler.py            # Cosine learning rate restarts and layer freezing
-│   └── trainer.py              # Train/evaluation loop, AMP, and checkpointing
-├── tests/
-│   ├── test_dataset.py         # Tokenizer and dataset packing unit tests
-│   ├── test_model.py           # Model outputs, freeze manager, and noise unit tests
-│   └── test_trainer.py         # Mock pretraining loop integration test
+│   └── trainer.py              # Core pretraining engine loop and checkpointing
+├── tests/                      # Comprehensive unit and integration test suite
 ├── pyproject.toml              # Project dependencies and tool configurations
 └── README.md                   # This documentation file
 ```
@@ -85,120 +95,51 @@ source .venv/bin/activate && mypy .
 
 ---
 
-## Sample Training Run (Mac / Apple Silicon)
+## Pretraining Execution (`python -m train.pretrain`)
 
-Below is a complete, self-contained Python script illustrating how to run a mock pretraining loop on macOS using the MPS GPU device.
+The primary way to run pretraining is via the `train.pretrain` module. All configuration flags can be plumbed directly through the command line to override YAML defaults:
 
-Create a training script (e.g. `run_training.py`) with the following content:
-
-```python
-import torch
-from src.config import TrainingConfig
-from src.dataset import load_french_dataset, train_custom_tokenizer, PackedTextDataset, get_dataloader
-from src.model import FrenchGemmaModel
-from src.scheduler import FreezeManager, get_cosine_warmup_scheduler
-from src.trainer import Pretrainer
-
-def main():
-    # 1. Load configuration optimized for Macbook Pro (configs/mlx_config.yaml)
-    config = TrainingConfig.from_yaml("configs/mlx_config.yaml")
-    print(f"Loaded config. Device target: {config.device}")
-
-    # 2. Load dataset (falls back to a mock corpus if Wikipedia offline)
-    texts = load_french_dataset(
-        dataset_path=config.dataset_path,
-        dataset_name=config.dataset_name,
-        split="train[:100]"
-    )
-    print(f"Loaded {len(texts)} articles/paragraphs.")
-
-    # 3. Train a custom tokenizer on the French data
-    print("Training custom ByteLevelBPETokenizer...")
-    tokenizer = train_custom_tokenizer(texts, vocab_size=1000, save_dir="./tokenizer_checkpoint")
-    
-    # 4. Create packed sequences dataset and DataLoader
-    dataset = PackedTextDataset(
-        texts=texts,
-        tokenizer=tokenizer,
-        max_seq_len=config.max_sequence_length,
-        stride=50
-    )
-    dataloader = get_dataloader(
-        dataset=dataset,
-        batch_size=config.batch_size,
-        num_workers=config.num_workers,
-        prefetch_factor=config.prefetch_factor,
-        pin_memory=config.pin_memory
-    )
-    print(f"Dataset packed into {len(dataset)} sequences of length {config.max_sequence_length}.")
-
-    # 5. Initialize FrenchGemmaModel from blank configuration
-    model = FrenchGemmaModel(
-        model_id=config.model_id,
-        vocab_size=len(tokenizer),
-        embedding_noise_std=config.embedding_noise_std
-    ).to(config.device)
-
-    # 6. Configure optimizer & schedulers
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
-    lr_scheduler = get_cosine_warmup_scheduler(optimizer, warmup_steps=config.warmup_steps, T_0=1000)
-    freeze_manager = FreezeManager(model, config.freeze_schedule)
-
-    # 7. Initialize Pretrainer loop
-    trainer = Pretrainer(
-        model=model,
-        tokenizer=tokenizer,
-        train_dataloader=dataloader,
-        val_dataloader=dataloader,
-        optimizer=optimizer,
-        lr_scheduler=lr_scheduler,
-        freeze_manager=freeze_manager,
-        device=config.device,
-        amp_enabled=config.amp_enabled,
-        amp_dtype=config.amp_dtype,
-        output_dir=config.output_dir,
-        tb_log_dir=config.tb_log_dir,
-        log_interval=10,
-        eval_interval=50,
-        save_interval=100
-    )
-
-    # 8. Start training!
-    print("Starting pretraining loop...")
-    trainer.train_epoch(epoch=0, global_step=0)
-    print("Pretraining completed successfully!")
-
-if __name__ == "__main__":
-    main()
+```bash
+# Run pretraining using macOS MPS config with CLI parameter overrides
+source .venv/bin/activate && python -m train.pretrain --config configs/mlx_config.yaml --model google/gemma-3-270m-it --batch-size 4 --learning-rate 2e-4
 ```
 
-Run the training script in single-process mode inside the virtual environment:
+### Full Dataset Training & Custom Dataset Splits
+By default, pretraining runs on the full unsupervised dataset (`num_examples: "all"`). To train on a specific subset for rapid testing or debugging, pass `--num-examples 100` (or `--num_examples 100`). The standalone `scripts/training_example.py` script defaults to 100 examples for quick smoke testing.
+
 ```bash
-source .venv/bin/activate && python scripts/run_training.py --config configs/mlx_config.yaml
+# Run pretraining on a subset of 100 examples for rapid debugging
+source .venv/bin/activate && python -m train.pretrain --config configs/nvidia_config.yaml --num-examples 100 --vocab-size 35000
 ```
 
 ### Multi-GPU Pretraining Run (DDP via `torchrun`)
-To train French Gemma 3 using multiple GPUs, use the launcher helper:
+To train French Gemma 3 across multiple GPUs using Distributed Data Parallel (DDP):
 ```bash
 source .venv/bin/activate && ./scripts/run_ddp.sh --config configs/nvidia_config.yaml --gpus 2
 ```
 Or launch directly using `torchrun`:
 ```bash
-source .venv/bin/activate && torchrun --nproc_per_node=2 scripts/run_training.py --config configs/nvidia_config.yaml
+source .venv/bin/activate && torchrun --nproc_per_node=2 -m train.pretrain --config configs/nvidia_config.yaml --num-examples all
+```
+
+### Running the Simple Training Example Script
+For a lightweight example script demonstrating dataset preparation and model training step-by-step:
+```bash
+source .venv/bin/activate && python scripts/training_example.py --config configs/mlx_config.yaml
 ```
 
 ---
 
 ## Contributing Invitation
 
-We welcome contributions to the French Gemma 3 training toolkit! Whether you are looking to optimize CUDA ROCm compilation, experiment with larger model variants, or enhance the dataset tokenization logic, we would love your help.
+We welcome contributions to the French Gemma 3 training toolkit! Whether you are looking to optimize CUDA/ROCm compilation, add new training strategies to `train/strategies/`, or enhance tokenization, we would love your help.
 
 ### How to Contribute
 1.  **Fork** the repository and clone your fork.
 2.  Set up the environment using `uv venv` and `uv pip install -e ".[dev]"`.
 3.  Implement your changes, following the local guidelines defined in [AGENTS.md](AGENTS.md).
 4.  Write matching tests in the `tests/` directory.
-5.  Verify that all tests and lint checks pass cleanly.
+5.  Verify that all tests, type checks, and lint checks pass cleanly (`pytest tests/`, `ruff check .`, `mypy .`).
 6.  Open a **Pull Request** detailing your enhancements.
 
-Feel free to open an issue to discuss design options or ask questions. Happy coding!
+Happy coding!

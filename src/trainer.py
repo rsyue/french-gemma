@@ -161,7 +161,7 @@ class Pretrainer:
             and hasattr(self.train_dataloader, "sampler")
             and hasattr(self.train_dataloader.sampler, "set_epoch")
         ):
-            self.train_dataloader.sampler.set_epoch(epoch)
+            self.train_dataloader.sampler.set_epoch(epoch + 1)
 
         self.model.train()
         accum_loss = 0.0
@@ -236,7 +236,7 @@ class Pretrainer:
                     seqs_processed = batches_processed * batch_size
                     throughput = seqs_processed / elapsed if elapsed > 0 else 0
                     msg = (
-                        f"Epoch {epoch} | Step {global_step} | Train Loss: {accum_loss:.4f} | "
+                        f"Epoch {epoch + 1} | Step {global_step} | Train Loss: {accum_loss:.4f} | "
                         f"LR: {current_lr:.6e} | Speed: {throughput:.2f} seqs/sec "
                         f"({elapsed:.2f}s elapsed)"
                     )

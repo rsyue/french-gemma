@@ -17,9 +17,8 @@ save_interval: 1000
 eval_interval: 500
 num_workers: 2
 prefetch_factor: 2
-freeze_schedule:
-  0: [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
-  1000: [12, 13, 14, 15, 16, 17]
-  2000: []
 embedding_noise_std: 0.05
 pin_memory: false
+vocab_size: 35000
+num_examples: "all"
+packing_batch_size: 2000

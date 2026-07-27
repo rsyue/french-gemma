@@ -290,3 +290,65 @@ def get_dataloader(
         pin_memory=pin_memory,
         collate_fn=collator,
     )
+
+
+def prepare_and_pack_data(
+    texts: List[str],
+    tokenizer: PreTrainedTokenizerFast,
+    cache_path: str,
+    packing_batch_size: int = 10000,
+    packing_log_interval: int = 10,
+) -> None:
+    """
+    Tokenizes and packs texts into a binary cache file using batching to limit memory usage.
+    """
+    logger.info("Packing tokens and generating binary cache file...")
+    bos_id = tokenizer.bos_token_id
+    eos_id = tokenizer.eos_token_id
+
+    valid_texts = [t for t in texts if t.strip()]
+    total_texts = len(valid_texts)
+
+    if total_texts == 0:
+        logger.warning("No non-empty texts to pack.")
+        open(cache_path, "wb").close()
+        return
+
+    total_batches = (total_texts + packing_batch_size - 1) // packing_batch_size
+
+    logger.info(
+        f"Total non-empty documents to pack: {total_texts} "
+        f"(divided into {total_batches} batches of size {packing_batch_size})"
+    )
+
+    with open(cache_path, "wb") as f:
+        for batch_idx in range(total_batches):
+            batch_start = batch_idx * packing_batch_size
+            batch_end = min(batch_start + packing_batch_size, total_texts)
+            text_batch = valid_texts[batch_start:batch_end]
+
+            batch_encoded = tokenizer(
+                text_batch,
+                add_special_tokens=False,
+            )["input_ids"]
+
+            all_tokens = []
+            for doc_ids in batch_encoded:
+                doc_with_special = []
+                if bos_id is not None:
+                    doc_with_special.append(bos_id)
+                doc_with_special.extend(doc_ids)
+                if eos_id is not None:
+                    doc_with_special.append(eos_id)
+                all_tokens.extend(doc_with_special)
+
+            if all_tokens:
+                arr = np.array(all_tokens, dtype=np.uint32)
+                f.write(arr.tobytes())
+
+            if (batch_idx + 1) % packing_log_interval == 0 or (batch_idx + 1) == total_batches:
+                progress_pct = ((batch_idx + 1) / total_batches) * 100
+                logger.info(
+                    f"Packing progress: Batch {batch_idx + 1}/{total_batches} "
+                    f"({progress_pct:.2f}%) - Processed {batch_end}/{total_texts} texts."
+                )

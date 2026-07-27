@@ -18,6 +18,7 @@ def test_config_defaults():
     assert config.max_eval_batches == 20
     assert config.max_checkpoints == 5
     assert config.data_cache_dir == "./data_cache"
+    assert config.num_examples == "all"
 
 
 def test_config_custom_values():
@@ -47,9 +48,18 @@ def test_all_repo_configs():
     assert os.path.exists(config_dir)
     yaml_files = [f for f in os.listdir(config_dir) if f.endswith(".yaml")]
     assert len(yaml_files) > 0
+    expected_packing_sizes = {
+        "amd_config.yaml": 10000,
+        "mlx_config.yaml": 2000,
+        "nvidia_config.yaml": 1000,
+    }
     for filename in yaml_files:
         path = os.path.join(config_dir, filename)
         config = TrainingConfig.from_yaml(path)
         assert config is not None
         assert isinstance(config.model_id, str)
+        assert config.num_examples == "all"
+        if filename in expected_packing_sizes:
+            assert config.packing_batch_size == expected_packing_sizes[filename]
+
 

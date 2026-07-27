@@ -5,9 +5,10 @@ This module parses YAML files into the TrainingConfig dataclass, defining traini
 hardware execution, datasets, tokenizer, optimization, and checkpoint settings.
 """
 
+import inspect
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Union
 
 import yaml
 
@@ -35,7 +36,8 @@ class TrainingConfig:
     prefetch_factor: int = 2
     pin_memory: bool = True
     freeze_schedule: Dict[int, List[int]] = field(default_factory=dict)
-    vocab_size: Optional[int] = None
+    vocab_size: int = 35000
+    num_examples: Union[int, str] = "all"
     output_dir: str = "./checkpoints"
     data_cache_dir: str = "./data_cache"
     tb_log_dir: str = "./runs"
@@ -45,7 +47,6 @@ class TrainingConfig:
     repetition_penalty: float = 1.2
     packing_batch_size: int = 10000
     packing_log_interval: int = 10
-
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "TrainingConfig":
@@ -57,12 +58,9 @@ class TrainingConfig:
         if not data or not isinstance(data, dict):
             data = {}
 
-        # Parse freeze schedule keys as integers
         if "freeze_schedule" in data and data["freeze_schedule"] is not None:
             data["freeze_schedule"] = {int(k): list(v) for k, v in data["freeze_schedule"].items()}
 
-        # Filter out keys with None values and ignore any keys that are not valid fields
-        import inspect
         valid_keys = inspect.signature(cls).parameters.keys()
         filtered_data = {
             k: v for k, v in data.items()
@@ -70,4 +68,3 @@ class TrainingConfig:
         }
 
         return cls(**filtered_data)
-
