@@ -28,6 +28,8 @@ def test_parse_args_freeze_schedule_empty_by_default():
     """Verify default freeze_schedule is empty for pretrain runs."""
     config = parse_args_to_config([])
     assert config.freeze_schedule == {}
+    assert config.num_examples == "all"
+
 
 
 def test_parse_args_num_examples_all():
@@ -37,3 +39,12 @@ def test_parse_args_num_examples_all():
 
     config_num = parse_args_to_config(["--num_examples", "500"])
     assert config_num.num_examples == 500
+
+
+def test_parse_args_packing_batch_size():
+    """Verify --packing-batch-size and --packing_batch_size override config values."""
+    config = parse_args_to_config(["--packing-batch-size", "500"])
+    assert config.packing_batch_size == 500
+
+    config_underscore = parse_args_to_config(["--packing_batch_size", "1500"])
+    assert config_underscore.packing_batch_size == 1500

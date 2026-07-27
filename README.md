@@ -105,11 +105,11 @@ source .venv/bin/activate && python -m train.pretrain --config configs/mlx_confi
 ```
 
 ### Full Dataset Training & Custom Dataset Splits
-By default, example configurations train on a 100-sample subset (`num_examples: 100`) for rapid testing. To pretrain on the full unsupervised dataset, pass `--num-examples all` (or `--num_examples all`):
+By default, pretraining runs on the full unsupervised dataset (`num_examples: "all"`). To train on a specific subset for rapid testing or debugging, pass `--num-examples 100` (or `--num_examples 100`). The standalone `scripts/training_example.py` script defaults to 100 examples for quick smoke testing.
 
 ```bash
-# Run pretraining on the FULL French Wikipedia dataset
-source .venv/bin/activate && python -m train.pretrain --config configs/nvidia_config.yaml --num-examples all --vocab-size 35000
+# Run pretraining on a subset of 100 examples for rapid debugging
+source .venv/bin/activate && python -m train.pretrain --config configs/nvidia_config.yaml --num-examples 100 --vocab-size 35000
 ```
 
 ### Multi-GPU Pretraining Run (DDP via `torchrun`)

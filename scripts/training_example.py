@@ -4,6 +4,7 @@ Simple Training Example Script for French Gemma 3 supporting Single-GPU, MPS, an
 
 import logging
 import os
+import sys
 from typing import Optional
 
 import torch
@@ -32,8 +33,17 @@ parse_and_load_config = parse_args_to_config
 def main() -> None:
     config = parse_args_to_config()
 
+    # Default to 100 examples for quick smoke testing if num_examples was not explicitly passed via CLI
+    cli_num_ex_passed = any(
+        arg.startswith("--num-examples") or arg.startswith("--num_examples")
+        for arg in sys.argv
+    )
+    if not cli_num_ex_passed and config.num_examples == "all":
+        config.num_examples = 100
+
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision("high")
+
 
     is_distributed = "WORLD_SIZE" in os.environ
     if is_distributed:

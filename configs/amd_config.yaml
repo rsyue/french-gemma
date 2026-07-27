@@ -20,4 +20,5 @@ prefetch_factor: 2
 embedding_noise_std: 0.05
 pin_memory: true
 vocab_size: 250000
-num_examples: 100
+num_examples: "all"
+packing_batch_size: 10000

@@ -37,7 +37,7 @@ class TrainingConfig:
     pin_memory: bool = True
     freeze_schedule: Dict[int, List[int]] = field(default_factory=dict)
     vocab_size: int = 35000
-    num_examples: Union[int, str] = 100
+    num_examples: Union[int, str] = "all"
     output_dir: str = "./checkpoints"
     data_cache_dir: str = "./data_cache"
     tb_log_dir: str = "./runs"
