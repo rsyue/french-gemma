@@ -120,6 +120,18 @@ class Pretrainer:
         self.repetition_penalty = repetition_penalty
         self.periodic_checkpoints: List[str] = []
 
+        # Determine total training steps for log formatting
+        self.total_steps: Optional[int] = max_steps
+        if (
+            self.total_steps is None
+            and self.train_dataloader is not None
+            and hasattr(self.train_dataloader, "__len__")
+        ):
+            try:
+                self.total_steps = len(self.train_dataloader) // max(1, self.grad_accum_steps)
+            except Exception:
+                self.total_steps = None
+
         # Setup AMP dtype
         if amp_dtype == "bfloat16":
             self.amp_dtype = torch.bfloat16
@@ -151,6 +163,12 @@ class Pretrainer:
         self.best_loss_checkpoints: List[Dict[str, Any]] = []
         self.latest_train_loss: float = float("inf")
         self.last_log_time = time.time()
+
+    def format_step(self, step: int) -> str:
+        """Formats the step index, appending total_steps in denominator if known."""
+        if self.total_steps is not None:
+            return f"{step}/{self.total_steps}"
+        return f"{step}"
 
     def train_epoch(self, epoch: int, global_step: int) -> int:
         """
@@ -222,7 +240,7 @@ class Pretrainer:
                 global_step += 1
 
                 if self.max_steps is not None and global_step >= self.max_steps:
-                    logger.info(f"Reached max steps: {global_step} >= {self.max_steps}. Stopping epoch early.")
+                    logger.info(f"Reached max steps: {self.format_step(global_step)}. Stopping epoch early.")
                     break
 
                 # Logging to console & TensorBoard
@@ -235,8 +253,9 @@ class Pretrainer:
                     batches_processed = self.grad_accum_steps * self.log_interval
                     seqs_processed = batches_processed * batch_size
                     throughput = seqs_processed / elapsed if elapsed > 0 else 0
+                    step_str = self.format_step(global_step)
                     msg = (
-                        f"Epoch {epoch + 1} | Step {global_step} | Train Loss: {accum_loss:.4f} | "
+                        f"Epoch {epoch + 1} | Step {step_str} | Train Loss: {accum_loss:.4f} | "
                         f"LR: {current_lr:.6e} | Speed: {throughput:.2f} seqs/sec "
                         f"({elapsed:.2f}s elapsed)"
                     )
@@ -315,8 +334,9 @@ class Pretrainer:
         perplexity = math.exp(avg_loss) if avg_loss < 20 else float("inf")
         t_eval = time.time() - t_eval_start
 
+        step_str = self.format_step(global_step)
         msg = (
-            f"--- Eval Step {global_step} | Loss: {avg_loss:.4f} | "
+            f"--- Eval Step {step_str} | Loss: {avg_loss:.4f} | "
             f"Perplexity: {perplexity:.4f} | Time: {t_eval:.2f}s ---"
         )
         if self.is_main_process:

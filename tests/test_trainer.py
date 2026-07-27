@@ -331,3 +331,38 @@ def test_generate_text_repetition_penalty():
     )
     assert generated_with_penalty == "5 6"
 
+
+def test_format_step_denominator():
+    class MockModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(10, 10)
+
+    trainer = Pretrainer(
+        model=MockModel(),
+        tokenizer=None,
+        train_dataloader=None,
+        val_dataloader=None,
+        optimizer=None,
+        lr_scheduler=None,
+        freeze_manager=None,
+        device="cpu",
+        max_steps=2730,
+    )
+    assert trainer.format_step(1) == "1/2730"
+    assert trainer.format_step(50) == "50/2730"
+
+    trainer_no_max = Pretrainer(
+        model=MockModel(),
+        tokenizer=None,
+        train_dataloader=None,
+        val_dataloader=None,
+        optimizer=None,
+        lr_scheduler=None,
+        freeze_manager=None,
+        device="cpu",
+        max_steps=None,
+    )
+    assert trainer_no_max.format_step(1) == "1"
+
+
