@@ -19,6 +19,6 @@ num_workers: 1
 prefetch_factor: 2
 embedding_noise_std: 0.05
 pin_memory: true
-vocab_size: 35000
+vocab_size: 25000
 num_examples: "all"
 packing_batch_size: 1000
