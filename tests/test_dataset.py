@@ -69,3 +69,19 @@ def test_load_french_dataset_fallback():
     # Calling load_french_dataset with invalid path to trigger fallback
     texts = load_french_dataset(dataset_path="invalid_path_xyz", fallback_texts=["fallback"])
     assert texts == ["fallback"]
+
+
+def test_dataloader_deterministic_seeding(mock_texts):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tokenizer = train_custom_tokenizer(mock_texts, vocab_size=100, save_dir=tmpdir)
+        dataset = PackedTextDataset(mock_texts, tokenizer, max_seq_len=8, stride=2)
+        dl1 = get_dataloader(dataset, batch_size=2, num_workers=0, pin_memory=False, shuffle=True, seed=42)
+        dl2 = get_dataloader(dataset, batch_size=2, num_workers=0, pin_memory=False, shuffle=True, seed=42)
+
+        batch1 = [b["input_ids"] for b in dl1]
+        batch2 = [b["input_ids"] for b in dl2]
+
+        assert len(batch1) == len(batch2)
+        for b1, b2 in zip(batch1, batch2):
+            assert (b1 == b2).all()
+

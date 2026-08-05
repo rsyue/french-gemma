@@ -263,13 +263,16 @@ def get_dataloader(
     pin_memory: bool = True,
     shuffle: bool = True,
     sampler: Optional[torch.utils.data.Sampler[int]] = None,
+    seed: Optional[int] = None,
+    generator: Optional[torch.Generator] = None,
 ) -> DataLoader[Any]:
     """
     Creates a PyTorch DataLoader utilizing DataCollatorForLanguageModeling.
+    Supports deterministic shuffling via seed or explicit torch.Generator.
     """
     msg = (
         f"Creating DataLoader: batch_size={batch_size}, shuffle={shuffle}, "
-        f"num_workers={num_workers}, pin_memory={pin_memory}, sampler={sampler}"
+        f"num_workers={num_workers}, pin_memory={pin_memory}, sampler={sampler}, seed={seed}"
     )
     logger.info(msg)
     collator = DataCollatorForLanguageModeling(tokenizer=dataset.tokenizer, mlm=False)  # type: ignore[arg-type]
@@ -280,6 +283,9 @@ def get_dataloader(
     # If sampler is provided, shuffle must be False
     actual_shuffle = shuffle if sampler is None else False
 
+    if generator is None and seed is not None:
+        generator = torch.Generator().manual_seed(seed)
+
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -289,6 +295,7 @@ def get_dataloader(
         prefetch_factor=actual_prefetch,
         pin_memory=pin_memory,
         collate_fn=collator,
+        generator=generator,
     )
 
 

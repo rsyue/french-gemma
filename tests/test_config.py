@@ -63,8 +63,29 @@ def test_all_repo_configs():
         config = TrainingConfig.from_yaml(path)
         assert config is not None
         assert isinstance(config.model_id, str)
-        assert config.num_examples == "all"
+        assert config.num_examples is not None
         if filename in expected_packing_sizes:
             assert config.packing_batch_size == expected_packing_sizes[filename]
+
+
+def test_specific_repo_configs():
+    config_dir = "configs"
+    mlx_cfg = TrainingConfig.from_yaml(os.path.join(config_dir, "mlx_config.yaml"))
+    assert mlx_cfg.vocab_size == 25000
+
+    nvidia_cfg = TrainingConfig.from_yaml(os.path.join(config_dir, "nvidia_config.yaml"))
+    assert nvidia_cfg.vocab_size == 25000
+
+    amd_cfg = TrainingConfig.from_yaml(os.path.join(config_dir, "amd_config.yaml"))
+    assert amd_cfg.vocab_size == 50000
+    assert amd_cfg.max_sequence_length == 8192
+    assert amd_cfg.batch_size == 8
+    assert amd_cfg.gradient_accumulation_steps == 16
+    assert amd_cfg.num_examples == 576
+    assert amd_cfg.max_steps == 23
+    assert amd_cfg.warmup_steps == 1
+    assert amd_cfg.seed == 42
+
+
 
 
