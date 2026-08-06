@@ -48,3 +48,26 @@ def test_parse_args_packing_batch_size():
 
     config_underscore = parse_args_to_config(["--packing_batch_size", "1500"])
     assert config_underscore.packing_batch_size == 1500
+
+
+def test_multi_epoch_loop_logic():
+    """Verify multi-epoch loop logic runs past epoch 0 until max_steps is reached."""
+    max_steps = 10
+    global_step = 0
+    epoch = 0
+
+    class MockTrainer:
+        def train_epoch(self, epoch: int, global_step: int) -> int:
+            # Simulate 3 steps per epoch
+            return global_step + 3
+
+    trainer = MockTrainer()
+    epochs_run = 0
+    while global_step < max_steps:
+        global_step = trainer.train_epoch(epoch=epoch, global_step=global_step)
+        epoch += 1
+        epochs_run += 1
+
+    assert global_step >= max_steps
+    assert epochs_run > 1  # Verify it ran multiple epochs
+

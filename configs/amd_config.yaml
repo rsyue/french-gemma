@@ -12,7 +12,7 @@ max_steps: 25
 compile: true
 amp_enabled: true
 amp_dtype: "bfloat16"
-log_interval: 10
+log_interval: 1
 save_interval: 1000
 eval_interval: 200
 num_workers: 8

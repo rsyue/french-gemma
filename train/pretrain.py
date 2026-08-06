@@ -204,10 +204,10 @@ def main() -> None:
 
     try:
         global_step = 0
-        for epoch in range(1):
-            if global_step >= config.max_steps:
-                break
+        epoch = 0
+        while global_step < config.max_steps:
             global_step = trainer.train_epoch(epoch=epoch, global_step=global_step)
+            epoch += 1
     finally:
         trainer.close()
         if is_distributed and dist.is_initialized():
