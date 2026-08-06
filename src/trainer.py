@@ -162,6 +162,8 @@ class Pretrainer:
         self.best_checkpoints = self.best_ppl_checkpoints
         self.best_loss_checkpoints: List[Dict[str, Any]] = []
         self.latest_train_loss: float = float("inf")
+        self.total_train_loss: float = 0.0
+        self.total_train_steps: int = 0
         self.last_log_time = time.time()
 
     def format_step(self, step: int) -> str:
@@ -183,6 +185,7 @@ class Pretrainer:
 
         self.model.train()
         accum_loss = 0.0
+        accum_batches_count = 0
 
         for batch_idx, batch in enumerate(self.train_dataloader):
             # Update freeze manager layers if schedule matches
@@ -221,6 +224,7 @@ class Pretrainer:
                 loss.backward()
 
             accum_loss += loss.item() * self.grad_accum_steps
+            accum_batches_count += 1
 
             # Optimizer step (respecting gradient accumulation steps)
             if (batch_idx + 1) % self.grad_accum_steps == 0 or (batch_idx + 1) == len(self.train_dataloader):
@@ -238,6 +242,11 @@ class Pretrainer:
                     self.lr_scheduler.step()
 
                 global_step += 1
+                step_loss = accum_loss / max(1, accum_batches_count)
+                self.total_train_loss += step_loss
+                self.total_train_steps += 1
+                avg_train_loss = self.total_train_loss / max(1, self.total_train_steps)
+                self.latest_train_loss = step_loss
 
                 if self.max_steps is not None and global_step >= self.max_steps:
                     logger.info(f"Reached max steps: {self.format_step(global_step)}. Stopping epoch early.")
@@ -250,24 +259,23 @@ class Pretrainer:
                     has_bs = self.train_dataloader and hasattr(self.train_dataloader, "batch_size")
                     loader_bs = self.train_dataloader.batch_size if has_bs else 1
                     batch_size = loader_bs if loader_bs is not None else 1
-                    batches_processed = self.grad_accum_steps * self.log_interval
+                    batches_processed = accum_batches_count * self.log_interval
                     seqs_processed = batches_processed * batch_size
                     throughput = seqs_processed / elapsed if elapsed > 0 else 0
                     step_str = self.format_step(global_step)
                     msg = (
-                        f"Epoch {epoch + 1} | Step {step_str} | Train Loss: {accum_loss:.4f} | "
-                        f"LR: {current_lr:.6e} | Speed: {throughput:.2f} seqs/sec "
+                        f"Epoch {epoch + 1} | Step {step_str} | Train Loss: {step_loss:.4f} "
+                        f"(Avg: {avg_train_loss:.4f}) | LR: {current_lr:.6e} | Speed: {throughput:.2f} seqs/sec "
                         f"({elapsed:.2f}s elapsed)"
                     )
                     if self.is_main_process:
                         logger.info(msg)
                         if self.writer is not None:
-                            self.writer.add_scalar("Loss/train", accum_loss, global_step)
+                            self.writer.add_scalar("Loss/train_step", step_loss, global_step)
+                            self.writer.add_scalar("Loss/train", avg_train_loss, global_step)
                             self.writer.add_scalar("LR/train", current_lr, global_step)
                             self.writer.add_scalar("Speed/train_seqs_per_sec", throughput, global_step)
                     self.last_log_time = time.time()
-
-                self.latest_train_loss = accum_loss
 
                 # Periodic Evaluation
                 if global_step % self.eval_interval == 0:
@@ -279,6 +287,7 @@ class Pretrainer:
                     self.save_checkpoint(global_step, perplexity=float("inf"))
 
                 accum_loss = 0.0
+                accum_batches_count = 0
 
         return global_step
 

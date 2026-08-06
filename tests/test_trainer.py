@@ -366,3 +366,68 @@ def test_format_step_denominator():
     assert trainer_no_max.format_step(1) == "1"
 
 
+def test_cumulative_average_train_loss():
+    """Verify average train loss is normalized per step and accumulated over total steps across epochs."""
+    class MockModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(2, 2)
+
+        def forward(self, input_ids, **kwargs):
+            class Out:
+                loss = torch.tensor(4.0, requires_grad=True)
+            return Out()
+
+    class MockOptimizer:
+        def step(self):
+            pass
+        def zero_grad(self):
+            pass
+        def param_groups(self):
+            return [{"lr": 1e-4}]
+
+    class MockLoader:
+        def __init__(self, num_batches):
+            self.num_batches = num_batches
+            self.batch_size = 2
+        def __len__(self):
+            return self.num_batches
+        def __iter__(self):
+            for _ in range(self.num_batches):
+                yield {"input_ids": torch.tensor([[1, 2], [3, 4]])}
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        model = MockModel()
+        opt = MockOptimizer()
+        opt.param_groups = [{"lr": 1e-4}]
+        dl = MockLoader(3)
+
+        trainer = Pretrainer(
+            model=model,
+            tokenizer=None,
+            train_dataloader=dl,
+            val_dataloader=None,
+            optimizer=opt,
+            lr_scheduler=None,
+            freeze_manager=None,
+            device="cpu",
+            amp_enabled=False,
+            grad_accum_steps=2,
+            log_interval=1,
+            output_dir=tmpdir,
+            tb_log_dir=tmpdir,
+        )
+
+        step1 = trainer.train_epoch(epoch=0, global_step=0)
+        assert trainer.total_train_steps == 2
+        # Step 1 (2 batches of loss 4.0): step_loss = 4.0. Step 2 (1 batch of loss 4.0): step_loss = 4.0
+        assert abs(trainer.latest_train_loss - 4.0) < 1e-5
+        avg_loss = trainer.total_train_loss / trainer.total_train_steps
+        assert abs(avg_loss - 4.0) < 1e-5
+
+        # Train epoch 1: total_train_steps should accumulate to 4 without resetting
+        trainer.train_epoch(epoch=1, global_step=step1)
+        assert trainer.total_train_steps == 4
+
+
+
