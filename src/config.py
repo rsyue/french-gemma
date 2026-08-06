@@ -53,6 +53,7 @@ class TrainingConfig:
     repetition_penalty: float = 1.2
     packing_batch_size: int = 10000
     packing_log_interval: int = 10
+    dist_timeout_seconds: int = 7200
     seed: int = 42
 
     @classmethod
