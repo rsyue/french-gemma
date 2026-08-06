@@ -70,7 +70,6 @@ class PackedTextDataset(Dataset[Dict[str, Any]]):
         total_texts = len(texts)
         logger.info(f"Starting tokenization of {total_texts} documents...")
 
-        # Tokenize and format each document as [BOS] + tokens + [EOS]
         all_token_ids = []
         processed_count = 0
         for idx, text in enumerate(texts):
@@ -86,7 +85,6 @@ class PackedTextDataset(Dataset[Dict[str, Any]]):
             all_token_ids.extend(doc_ids)
             processed_count += 1
 
-            # Print/log progress periodically if dataset is large (e.g. >= 100 texts)
             if total_texts >= 100 and ((idx + 1) % max(1, total_texts // 10) == 0 or (idx + 1) == total_texts):
                 elapsed = time.time() - t0
                 throughput = (idx + 1) / elapsed if elapsed > 0 else 0
@@ -105,13 +103,11 @@ class PackedTextDataset(Dataset[Dict[str, Any]]):
         )
         logger.info(msg)
 
-        # Pack token ids into chunks using sliding window
         logger.info("Packing tokens into fixed-length sequences...")
         t_pack_start = time.time()
         self.chunks = []
         step = max(1, max_seq_len - stride)
 
-        # If total tokens are less than max_seq_len, pad to max_seq_len
         if len(all_token_ids) < max_seq_len:
             pad_id = tokenizer.pad_token_id or 0
             padded_ids = all_token_ids + [pad_id] * (max_seq_len - len(all_token_ids))
@@ -187,11 +183,9 @@ def train_custom_tokenizer(
         special_tokens=special_tokens,
     )
 
-    # Save tokenizer
     tokenizer_json_path = os.path.join(save_dir, "tokenizer.json")
     tokenizer.save(tokenizer_json_path)
 
-    # Wrap as PreTrainedTokenizerFast
     hf_tokenizer = PreTrainedTokenizerFast(  # type: ignore[no-untyped-call]
         tokenizer_file=tokenizer_json_path,
         bos_token="<bos>" if "<bos>" in special_tokens else None,
@@ -200,16 +194,12 @@ def train_custom_tokenizer(
         unk_token="<unk>" if "<unk>" in special_tokens else None,
     )
 
-    # Ensure correct padding side for training decoders (Right padding)
     hf_tokenizer.padding_side = "right"
-
-    # Ensure pad_token_id, etc. are correctly assigned
     hf_tokenizer.pad_token_id = special_tokens.index("<pad>") if "<pad>" in special_tokens else 0
     hf_tokenizer.bos_token_id = special_tokens.index("<bos>") if "<bos>" in special_tokens else 1
     hf_tokenizer.eos_token_id = special_tokens.index("<eos>") if "<eos>" in special_tokens else 2
     hf_tokenizer.unk_token_id = special_tokens.index("<unk>") if "<unk>" in special_tokens else 3
 
-    # Save the wrapped tokenizer configuration
     hf_tokenizer.save_pretrained(save_dir)
     t_train = time.time() - t0
     logger.info(f"Tokenizer training completed in {t_train:.2f} seconds. Saved to {save_dir}")
@@ -299,6 +289,50 @@ def get_dataloader(
     )
 
 
+def is_data_prepared(cache_path: str, tokenizer_dir: str) -> bool:
+    """
+    Checks if tokenizer checkpoint directory and binary dataset cache (along with its .ready sentinel) exist.
+    """
+    tokenizer_json = os.path.join(tokenizer_dir, "tokenizer.json")
+    ready_path = cache_path + ".ready"
+    return (
+        os.path.isdir(tokenizer_dir)
+        and os.path.exists(tokenizer_json)
+        and os.path.exists(cache_path)
+        and os.path.getsize(cache_path) > 0
+        and os.path.exists(ready_path)
+    )
+
+
+def wait_for_data_prep(
+    cache_path: str,
+    tokenizer_dir: str,
+    poll_interval: int = 2,
+    timeout: int = 7200,
+    log_interval: int = 30,
+) -> None:
+    """
+    Waits for main process (Rank 0) to finish dataset preparation and tokenizer training.
+    """
+    logger.info("Waiting for main process (Rank 0) to complete data preparation...")
+    start_time = time.time()
+    last_logged = start_time
+    while not is_data_prepared(cache_path, tokenizer_dir):
+        elapsed = time.time() - start_time
+        if elapsed > timeout:
+            raise TimeoutError(
+                f"Timed out after {timeout} seconds waiting for Rank 0 to prepare dataset and tokenizer "
+                f"at cache path {cache_path} and tokenizer dir {tokenizer_dir}."
+            )
+        if time.time() - last_logged >= log_interval:
+            logger.info(
+                f"Still waiting for Rank 0 data preparation... (elapsed: {int(elapsed)}s)"
+            )
+            last_logged = time.time()
+        time.sleep(poll_interval)
+    logger.info("Data preparation completed by Rank 0. Proceeding.")
+
+
 def prepare_and_pack_data(
     texts: List[str],
     tokenizer: PreTrainedTokenizerFast,
@@ -308,10 +342,16 @@ def prepare_and_pack_data(
 ) -> None:
     """
     Tokenizes and packs texts into a binary cache file using batching to limit memory usage.
+    Writes atomically to a temporary file before creating a .ready sentinel file.
     """
     logger.info("Packing tokens and generating binary cache file...")
     bos_id = tokenizer.bos_token_id
     eos_id = tokenizer.eos_token_id
+
+    ready_path = cache_path + ".ready"
+    tmp_cache_path = cache_path + ".tmp"
+    if os.path.exists(ready_path):
+        os.remove(ready_path)
 
     valid_texts = [t for t in texts if t.strip()]
     total_texts = len(valid_texts)
@@ -319,6 +359,8 @@ def prepare_and_pack_data(
     if total_texts == 0:
         logger.warning("No non-empty texts to pack.")
         open(cache_path, "wb").close()
+        with open(ready_path, "w", encoding="utf-8") as f:
+            f.write("ready\n")
         return
 
     total_batches = (total_texts + packing_batch_size - 1) // packing_batch_size
@@ -328,7 +370,7 @@ def prepare_and_pack_data(
         f"(divided into {total_batches} batches of size {packing_batch_size})"
     )
 
-    with open(cache_path, "wb") as f:
+    with open(tmp_cache_path, "wb") as f:
         for batch_idx in range(total_batches):
             batch_start = batch_idx * packing_batch_size
             batch_end = min(batch_start + packing_batch_size, total_texts)
@@ -359,3 +401,9 @@ def prepare_and_pack_data(
                     f"Packing progress: Batch {batch_idx + 1}/{total_batches} "
                     f"({progress_pct:.2f}%) - Processed {batch_end}/{total_texts} texts."
                 )
+
+    os.replace(tmp_cache_path, cache_path)
+    with open(ready_path, "w", encoding="utf-8") as f:
+        f.write("ready\n")
+    logger.info(f"Binary dataset cache successfully saved to {cache_path}")
+
