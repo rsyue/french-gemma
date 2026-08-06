@@ -8,7 +8,7 @@ gradient_accumulation_steps: 16
 learning_rate: 3.0e-4
 weight_decay: 0.01
 warmup_steps: 1
-max_steps: 23
+max_steps: 25
 compile: true
 amp_enabled: true
 amp_dtype: "bfloat16"
@@ -20,6 +20,6 @@ prefetch_factor: 2
 embedding_noise_std: 0.05
 pin_memory: true
 vocab_size: 50000
-num_examples: 576
+num_examples: 1000
 packing_batch_size: 10000
 seed: 42

@@ -81,8 +81,8 @@ def test_specific_repo_configs():
     assert amd_cfg.max_sequence_length == 8192
     assert amd_cfg.batch_size == 8
     assert amd_cfg.gradient_accumulation_steps == 16
-    assert amd_cfg.num_examples == 576
-    assert amd_cfg.max_steps == 23
+    assert amd_cfg.num_examples == 1000
+    assert amd_cfg.max_steps == 25
     assert amd_cfg.warmup_steps == 1
     assert amd_cfg.seed == 42
 
