@@ -22,3 +22,4 @@ pin_memory: false
 vocab_size: 25000
 num_examples: "all"
 packing_batch_size: 2000
+dist_timeout_seconds: 7200

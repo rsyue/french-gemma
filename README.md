@@ -11,11 +11,12 @@ This project implements architectures and practices from the **Gemma 3 Paper**: 
 1.  **Modular & Extensible Training Framework (`train/`)**: Core training features are decoupled into an extensible strategy/trainer hierarchy supporting dependency injection, protocol contracts, and custom training algorithms (e.g. pretraining, future RLHF/DPO extensions).
 2.  **Decoder-Only Causal Training**: Configures and instantiates a blank Gemma 3 model, adding a PyTorch-native `nn.Linear` LM Head.
 3.  **Custom Tokenization**: Trains a local byte-level BPE tokenizer (`ByteLevelBPETokenizer`) from scratch to correctly handle French contractions, elisions (e.g. `l'`, `d'`), and accents. Uses **right padding** (`padding_side = "right"`) optimized for causal decoder training.
-4.  **Sliding Window Packing**: Packs token sequences separated by `<bos>` and `<eos>` tokens into fixed `max_sequence_length` inputs using disk-backed binary cache packing.
+4.  **Sliding Window Packing & Sentinel Synchronization**: Packs token sequences separated by `<bos>` and `<eos>` tokens into fixed `max_sequence_length` inputs using atomic disk-backed binary cache packing with `.ready` sentinel synchronization across distributed ranks.
 5.  **Gaussian Embedding Noise**: Introduces adjustable Gaussian noise (via `embedding_noise_std`) directly into word embeddings during training (NEFTune style) to boost generalization and robustness. Noise is bypassed automatically during evaluation.
 6.  **Un-frozen Pretraining by Default**: Runs pretraining without layer freezing by default for max model capacity (optional layer freezing schedules can still be configured).
-7.  **Advanced Training Loops**: Full support for mixed-precision (AMP) training, gradient accumulation, gradient clipping, AdamW optimizer, and Cosine Annealing with Warm Restarts and Warmup.
-8.  **Log & Checkpoint Management**: Reports progress to TensorBoard and retains only the **three best checkpoints** based on validation perplexity.
+7.  **Robust Distributed Pretraining (DDP)**: Defers `dist.init_process_group` until rank 0 finishes data preparation, utilizing filesystem sentinel polling and configurable `dist_timeout_seconds` to eliminate NCCL communication timeouts.
+8.  **Advanced Training Loops**: Full support for mixed-precision (AMP) training, gradient accumulation, gradient clipping, AdamW optimizer, and Cosine Annealing with Warm Restarts and Warmup.
+9.  **Log & Checkpoint Management**: Reports progress to TensorBoard and retains only the **three best checkpoints** based on validation perplexity.
 
 ---
 
@@ -121,6 +122,9 @@ Or launch directly using `torchrun`:
 ```bash
 source .venv/bin/activate && torchrun --nproc_per_node=2 -m train.pretrain --config configs/nvidia_config.yaml --num-examples all
 ```
+
+> [!NOTE]
+> During multi-GPU runs, Rank 0 handles dataset tokenization and binary packing while worker ranks poll for the `.ready` sentinel file. `torch.distributed.init_process_group` is deferred until data preparation completes, eliminating NCCL heartbeat/watchdog timeouts. The distributed initialization timeout can be adjusted via `dist_timeout_seconds` in your YAML config.
 
 ### Running the Simple Training Example Script
 For a lightweight example script demonstrating dataset preparation and model training step-by-step:

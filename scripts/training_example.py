@@ -5,6 +5,7 @@ Simple Training Example Script for French Gemma 3 supporting Single-GPU, MPS, an
 import logging
 import os
 import sys
+from datetime import timedelta
 from typing import Optional
 
 import torch
@@ -16,9 +17,11 @@ from transformers import PreTrainedTokenizerFast
 from src.dataset import (
     PackedTextDataset,
     get_dataloader,
+    is_data_prepared,
     load_french_dataset,
     prepare_and_pack_data,
     train_custom_tokenizer,
+    wait_for_data_prep,
 )
 from src.model import FrenchGemmaModel
 from src.scheduler import FreezeManager, get_cosine_warmup_scheduler
@@ -44,19 +47,15 @@ def main() -> None:
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision("high")
 
-
     is_distributed = "WORLD_SIZE" in os.environ
     if is_distributed:
-        backend = "nccl" if torch.cuda.is_available() else "gloo"
-        dist.init_process_group(backend=backend)
-        local_rank = int(os.environ["LOCAL_RANK"])
-        rank = int(os.environ["RANK"])
-        world_size = int(os.environ["WORLD_SIZE"])
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        rank = int(os.environ.get("RANK", 0))
+        world_size = int(os.environ.get("WORLD_SIZE", 1))
         device = f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu"
-        if torch.cuda.is_available():
-            torch.cuda.set_device(device)
     else:
         rank = 0
+        local_rank = 0
         world_size = 1
         device = config.device
 
@@ -74,31 +73,42 @@ def main() -> None:
     if rank == 0:
         logger.info("Main process (Rank 0) starting data preparation...")
         os.makedirs(config.data_cache_dir, exist_ok=True)
+        if not is_data_prepared(cache_path, tokenizer_dir):
+            num_ex_str = str(config.num_examples).strip().lower()
+            if num_ex_str in ("all", "full", "none", "0"):
+                dataset_split = "train"
+            elif num_ex_str.isdigit():
+                dataset_split = f"train[:{num_ex_str}]"
+            else:
+                dataset_split = str(config.num_examples)
 
-        num_ex_str = str(config.num_examples).strip().lower()
-        if num_ex_str in ("all", "full", "none", "0"):
-            dataset_split = "train"
-        elif num_ex_str.isdigit():
-            dataset_split = f"train[:{num_ex_str}]"
+            texts = load_french_dataset(
+                dataset_path=config.dataset_path,
+                dataset_name=config.dataset_name,
+                split=dataset_split,
+            )
+            vocab_size = config.vocab_size or 35000
+            tokenizer = train_custom_tokenizer(texts, vocab_size=vocab_size, save_dir=tokenizer_dir)
+            prepare_and_pack_data(
+                texts=texts,
+                tokenizer=tokenizer,
+                cache_path=cache_path,
+                packing_batch_size=config.packing_batch_size,
+                packing_log_interval=config.packing_log_interval,
+            )
         else:
-            dataset_split = str(config.num_examples)
-
-        texts = load_french_dataset(
-            dataset_path=config.dataset_path,
-            dataset_name=config.dataset_name,
-            split=dataset_split,
-        )
-        vocab_size = config.vocab_size or 35000
-        tokenizer = train_custom_tokenizer(texts, vocab_size=vocab_size, save_dir=tokenizer_dir)
-        prepare_and_pack_data(
-            texts=texts,
-            tokenizer=tokenizer,
-            cache_path=cache_path,
-            packing_batch_size=config.packing_batch_size,
-            packing_log_interval=config.packing_log_interval,
-        )
+            logger.info("Dataset and tokenizer already prepared. Skipping preparation step.")
+    elif is_distributed:
+        wait_for_data_prep(cache_path, tokenizer_dir, timeout=config.dist_timeout_seconds)
 
     if is_distributed:
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        dist.init_process_group(
+            backend=backend,
+            timeout=timedelta(seconds=config.dist_timeout_seconds),
+        )
+        if torch.cuda.is_available():
+            torch.cuda.set_device(device)
         dist.barrier()
 
     tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_dir)

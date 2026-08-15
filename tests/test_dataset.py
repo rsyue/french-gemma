@@ -5,11 +5,20 @@ This module contains unit tests validating BPE tokenizer training, French datase
 packed sliding-window sequence packing, padding conventions, and DataLoader building.
 """
 
+import os
 import tempfile
 
 import pytest
 
-from src.dataset import PackedTextDataset, get_dataloader, load_french_dataset, train_custom_tokenizer
+from src.dataset import (
+    PackedTextDataset,
+    get_dataloader,
+    is_data_prepared,
+    load_french_dataset,
+    prepare_and_pack_data,
+    train_custom_tokenizer,
+    wait_for_data_prep,
+)
 
 
 @pytest.fixture
@@ -84,4 +93,33 @@ def test_dataloader_deterministic_seeding(mock_texts):
         assert len(batch1) == len(batch2)
         for b1, b2 in zip(batch1, batch2):
             assert (b1 == b2).all()
+
+
+def test_prepare_and_pack_data_sentinel(mock_texts):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tok_dir = os.path.join(tmpdir, "tokenizer")
+        cache_bin = os.path.join(tmpdir, "cache.bin")
+
+        assert not is_data_prepared(cache_bin, tok_dir)
+
+        tokenizer = train_custom_tokenizer(mock_texts, vocab_size=100, save_dir=tok_dir)
+        prepare_and_pack_data(mock_texts, tokenizer, cache_bin, packing_batch_size=2)
+
+        assert os.path.exists(cache_bin)
+        assert os.path.exists(cache_bin + ".ready")
+        assert is_data_prepared(cache_bin, tok_dir)
+
+        # wait_for_data_prep should return immediately when data is prepared
+        wait_for_data_prep(cache_bin, tok_dir, poll_interval=1, timeout=5)
+
+
+def test_wait_for_data_prep_timeout():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tok_dir = os.path.join(tmpdir, "tokenizer")
+        cache_bin = os.path.join(tmpdir, "cache.bin")
+
+        with pytest.raises(TimeoutError):
+            wait_for_data_prep(cache_bin, tok_dir, poll_interval=0.1, timeout=0.3, log_interval=0.1)
+
+
 

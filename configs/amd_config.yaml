@@ -22,4 +22,5 @@ pin_memory: true
 vocab_size: 50000
 num_examples: 1000
 packing_batch_size: 10000
+dist_timeout_seconds: 7200
 seed: 42
