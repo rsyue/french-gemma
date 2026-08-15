@@ -310,8 +310,10 @@ def load_dataset_mix(
             split = entry.split or default_split
         else:
             count = max(1, round(target_total * weight))
-            if entry.split:
+            if entry.split and "[" in entry.split:
                 split = entry.split
+            elif entry.split:
+                split = f"{entry.split}[:{count}]"
             else:
                 split = f"{default_split}[:{count}]"
 
@@ -478,13 +480,11 @@ def prepare_and_pack_data(
 
             all_tokens = []
             for doc_ids in batch_encoded:
-                doc_with_special = []
                 if bos_id is not None:
-                    doc_with_special.append(bos_id)
-                doc_with_special.extend(doc_ids)
+                    all_tokens.append(bos_id)
+                all_tokens.extend(doc_ids)
                 if eos_id is not None:
-                    doc_with_special.append(eos_id)
-                all_tokens.extend(doc_with_special)
+                    all_tokens.append(eos_id)
 
             if all_tokens:
                 arr = np.array(all_tokens, dtype=np.uint32)

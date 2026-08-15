@@ -28,12 +28,17 @@ class DatasetMixEntry:
         if not path:
             raise ValueError("DatasetMixEntry must specify 'dataset_path' or 'path'.")
         name = data.get("dataset_name") or data.get("name")
-        pct = data.get("percentage") or data.get("weight") or data.get("pct") or 100.0
+        raw_pct = None
+        for key in ("percentage", "weight", "pct"):
+            if key in data and data[key] is not None:
+                raw_pct = data[key]
+                break
+        pct = float(raw_pct) if raw_pct is not None else 100.0
         split = data.get("split")
         return cls(
             dataset_path=str(path),
             dataset_name=str(name) if name is not None else None,
-            percentage=float(pct),
+            percentage=pct,
             split=str(split) if split is not None else None,
         )
 

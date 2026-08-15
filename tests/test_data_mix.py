@@ -214,3 +214,40 @@ def test_dataset_mix_end_to_end_packing() -> None:
             assert os.path.exists(cache_bin)
             assert os.path.exists(cache_bin + ".ready")
             assert os.path.getsize(cache_bin) > 0
+
+
+def test_dataset_mix_entry_falsy_zero_percentage() -> None:
+    entry1 = DatasetMixEntry.from_dict({"dataset_path": "wiki", "percentage": 0.0})
+    assert entry1.percentage == 0.0
+
+    entry2 = DatasetMixEntry.from_dict({"path": "news", "weight": 0})
+    assert entry2.percentage == 0.0
+
+    entry3 = DatasetMixEntry.from_dict({"path": "books", "pct": 0.0})
+    assert entry3.percentage == 0.0
+
+
+def test_cli_non_existent_config_raises_file_not_found() -> None:
+    with pytest.raises(FileNotFoundError):
+        parse_args_to_config(["--config", "non_existent_config_file.yaml"])
+
+
+def test_load_dataset_mix_custom_split_without_slice() -> None:
+    mix = [
+        DatasetMixEntry(dataset_path="wiki", percentage=50.0, split="validation"),
+        DatasetMixEntry(dataset_path="news", percentage=50.0, split="train[:5]"),
+    ]
+
+    loaded_splits = []
+
+    def mock_loader(dataset_path, dataset_name=None, split="train", fallback_texts=None):
+        loaded_splits.append((dataset_path, split))
+        return [f"text_{dataset_path}_{i}" for i in range(5)]
+
+    with patch("src.dataset.load_french_dataset", side_effect=mock_loader):
+        load_dataset_mix(mix, total_examples=10, seed=42)
+
+        # "validation" without slice should be formatted with [:count]
+        assert ("wiki", "validation[:5]") in loaded_splits
+        # "train[:5]" already containing slice should be preserved as-is
+        assert ("news", "train[:5]") in loaded_splits

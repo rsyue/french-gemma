@@ -135,7 +135,7 @@ def main() -> None:
     val_sampler: Optional[DistributedSampler[int]] = None
     if is_distributed:
         train_sampler = DistributedSampler(
-            dataset, num_replicas=world_size, rank=rank, shuffle=True, seed=42
+            dataset, num_replicas=world_size, rank=rank, shuffle=True, seed=config.seed
         )
         val_sampler = DistributedSampler(
             dataset, num_replicas=world_size, rank=rank, shuffle=False
@@ -149,6 +149,7 @@ def main() -> None:
         pin_memory=config.pin_memory,
         shuffle=(train_sampler is None),
         sampler=train_sampler,
+        seed=config.seed,
     )
     val_dataloader = get_dataloader(
         dataset=dataset,
@@ -158,6 +159,7 @@ def main() -> None:
         pin_memory=config.pin_memory,
         shuffle=False,
         sampler=val_sampler,
+        seed=config.seed,
     )
 
     model: torch.nn.Module = FrenchGemmaModel(

@@ -127,3 +127,51 @@ def test_generate_response_calls_model_with_correct_parameters() -> None:
     assert kwargs.get("top_p") == 0.95
     assert kwargs.get("top_k") == 65
     assert kwargs.get("repetition_penalty") == 1.5
+
+
+def test_generate_response_with_chat_template() -> None:
+    mock_model = MagicMock()
+    mock_model.device = "cpu"
+    mock_model.generate.return_value = torch.tensor([[1, 2, 3]])
+
+    mock_tokenizer = MagicMock()
+    mock_tokenizer.chat_template = "{{ bos_token }}{% for message in messages %}{{ message.content }}{% endfor %}"
+    mock_tokenizer.apply_chat_template.return_value = MagicMock(
+        input_ids=torch.tensor([[1, 2]]),
+        to=lambda dev: MagicMock(input_ids=torch.tensor([[1, 2]])),
+    )
+
+    generate_response(
+        model=mock_model,
+        tokenizer=mock_tokenizer,
+        prompt="Bonjour avec template",
+        max_len=1024,
+        dtype=torch.bfloat16,
+        do_sample=True,
+    )
+
+    assert mock_tokenizer.apply_chat_template.called
+    assert mock_model.generate.called
+
+
+def test_generate_response_cpu_float16_safety() -> None:
+    mock_model = MagicMock()
+    mock_model.device = "cpu"
+    mock_model.generate.return_value = torch.tensor([[1, 2, 3]])
+
+    mock_tokenizer = MagicMock()
+    mock_tokenizer.chat_template = None
+    mock_tokenizer.return_value = MagicMock(
+        input_ids=torch.tensor([[1, 2]]),
+        to=lambda dev: {"input_ids": torch.tensor([[1, 2]])},
+    )
+
+    # Should not raise RuntimeError on CPU float16
+    generate_response(
+        model=mock_model,
+        tokenizer=mock_tokenizer,
+        prompt="Bonjour test float16",
+        max_len=512,
+        dtype=torch.float16,
+    )
+    assert mock_model.generate.called

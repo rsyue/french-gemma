@@ -125,7 +125,7 @@ def load_model_and_tokenizer(
         model_id, is_fast=True, truncation=True, max_length=max_len
     )
     model = AutoModelForCausalLM.from_pretrained(
-        model_id, device_map="auto", dtype=dtype
+        model_id, device_map="auto", torch_dtype=dtype
     ).eval()  # type: ignore[no-untyped-call]
 
     if hasattr(model, "generation_config") and model.generation_config is not None:
@@ -177,7 +177,7 @@ def generate_response(
     max_new_tokens = max(1, max_len - input_length)
 
     device_type = "cuda" if "cuda" in str(device) else ("mps" if "mps" in str(device) else "cpu")
-    autocast_enabled = device_type != "cpu" or dtype in (torch.bfloat16, torch.float16)
+    autocast_enabled = (device_type == "cuda") or (device_type == "cpu" and dtype == torch.bfloat16)
     with torch.autocast(device_type=device_type, dtype=dtype, enabled=autocast_enabled):
         with torch.inference_mode():
             output = model.generate(

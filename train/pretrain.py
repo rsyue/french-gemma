@@ -27,7 +27,6 @@ from src.dataset import (
 from src.model import FrenchGemmaModel
 from src.scheduler import FreezeManager, get_cosine_warmup_scheduler
 from src.trainer import Pretrainer
-from train.builder import TrainingFactory
 from train.cli import parse_args_to_config
 
 logger = logging.getLogger(__name__)
@@ -61,9 +60,6 @@ def main() -> None:
     logger.info(
         f"Pretraining launched. Model: {config.model_id} | Device: {device} | Distributed: {is_distributed}"
     )
-
-    strategy = TrainingFactory.build_strategy("pretrain")
-    logger.info(f"Loaded strategy: {type(strategy).__name__}")
 
     tokenizer_dir = os.path.join(config.data_cache_dir, "tokenizer_checkpoint")
     cache_path = os.path.join(config.data_cache_dir, "packed_dataset_cache.bin")

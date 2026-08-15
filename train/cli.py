@@ -4,7 +4,6 @@ Dynamic CLI argument parser and TrainingConfig plumbing for train package.
 
 import argparse
 import dataclasses
-import os
 from typing import Any, Dict, List, Optional, Union, get_args, get_origin
 
 from src.config import TrainingConfig, parse_data_mix_config
@@ -94,7 +93,7 @@ def parse_args_to_config(args_list: Optional[List[str]] = None) -> TrainingConfi
 
     parsed = parser.parse_args(args_list)
 
-    if parsed.config and os.path.exists(parsed.config):
+    if parsed.config:
         config = TrainingConfig.from_yaml(parsed.config)
     else:
         config = TrainingConfig()
