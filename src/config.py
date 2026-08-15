@@ -2,15 +2,84 @@
 Configuration Loader and Settings.
 
 This module parses YAML files into the TrainingConfig dataclass, defining training,
-hardware execution, datasets, tokenizer, optimization, and checkpoint settings.
+hardware execution, datasets, data mixes, tokenizer, optimization, and checkpoint settings.
 """
 
 import inspect
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import yaml
+
+
+@dataclass
+class DatasetMixEntry:
+    """Represents a single dataset source within a multi-dataset mix with proportional weighting."""
+
+    dataset_path: str
+    dataset_name: Optional[str] = None
+    percentage: float = 100.0
+    split: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "DatasetMixEntry":
+        path = data.get("dataset_path") or data.get("path")
+        if not path:
+            raise ValueError("DatasetMixEntry must specify 'dataset_path' or 'path'.")
+        name = data.get("dataset_name") or data.get("name")
+        pct = data.get("percentage") or data.get("weight") or data.get("pct") or 100.0
+        split = data.get("split")
+        return cls(
+            dataset_path=str(path),
+            dataset_name=str(name) if name is not None else None,
+            percentage=float(pct),
+            split=str(split) if split is not None else None,
+        )
+
+
+def parse_data_mix_config(raw_data_mix: Any) -> Optional[List[DatasetMixEntry]]:
+    """
+    Parses a raw data mix input (list of dictionaries, YAML file path, or serialized string)
+    into a list of DatasetMixEntry instances.
+    """
+    if raw_data_mix is None:
+        return None
+
+    if isinstance(raw_data_mix, str):
+        raw_str = raw_data_mix.strip()
+        if os.path.exists(raw_str):
+            with open(raw_str, "r", encoding="utf-8") as f:
+                loaded = yaml.safe_load(f)
+                if isinstance(loaded, dict) and "data_mix" in loaded:
+                    raw_data_mix = loaded["data_mix"]
+                elif isinstance(loaded, list):
+                    raw_data_mix = loaded
+                else:
+                    raise ValueError(f"Invalid data mix YAML structure in file: {raw_str}")
+        else:
+            try:
+                loaded = yaml.safe_load(raw_str)
+                if isinstance(loaded, list):
+                    raw_data_mix = loaded
+                elif isinstance(loaded, dict) and "data_mix" in loaded:
+                    raw_data_mix = loaded["data_mix"]
+            except Exception:
+                raise ValueError(f"Unable to parse data_mix string or locate YAML file: '{raw_str}'")
+
+    if not isinstance(raw_data_mix, list):
+        raise ValueError(f"Expected data_mix to be a list, got {type(raw_data_mix).__name__}")
+
+    parsed_entries: List[DatasetMixEntry] = []
+    for item in raw_data_mix:
+        if isinstance(item, DatasetMixEntry):
+            parsed_entries.append(item)
+        elif isinstance(item, dict):
+            parsed_entries.append(DatasetMixEntry.from_dict(item))
+        else:
+            raise ValueError(f"Unsupported data mix item type: {type(item).__name__}")
+
+    return parsed_entries
 
 
 @dataclass
@@ -18,6 +87,7 @@ class TrainingConfig:
     model_id: str = "google/gemma-3-270m-it"
     dataset_path: str = "wikimedia/wikipedia"
     dataset_name: str = "20231101.fr"
+    data_mix: Optional[List[DatasetMixEntry]] = None
     device: str = "cpu"
     max_sequence_length: int = 512
     batch_size: int = 2
@@ -68,6 +138,9 @@ class TrainingConfig:
 
         if "freeze_schedule" in data and data["freeze_schedule"] is not None:
             data["freeze_schedule"] = {int(k): list(v) for k, v in data["freeze_schedule"].items()}
+
+        if "data_mix" in data and data["data_mix"] is not None:
+            data["data_mix"] = parse_data_mix_config(data["data_mix"])
 
         valid_keys = inspect.signature(cls).parameters.keys()
         filtered_data = {

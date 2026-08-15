@@ -7,8 +7,9 @@ load French text datasets, pack tokens with a sliding window stride, and build P
 
 import logging
 import os
+import random
 import time
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Union
 
 import numpy as np
 import torch
@@ -16,6 +17,8 @@ from datasets import load_dataset
 from tokenizers import ByteLevelBPETokenizer
 from torch.utils.data import DataLoader, Dataset
 from transformers import DataCollatorForLanguageModeling, PreTrainedTokenizerFast
+
+from src.config import DatasetMixEntry
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +211,7 @@ def train_custom_tokenizer(
 
 def load_french_dataset(
     dataset_path: str = "wikimedia/wikipedia",
-    dataset_name: str = "20231101.fr",
+    dataset_name: Optional[str] = "20231101.fr",
     split: str = "train[:1000]",
     fallback_texts: Optional[List[str]] = None,
 ) -> List[str]:
@@ -217,8 +220,10 @@ def load_french_dataset(
     Falls back to a mock corpus or provided texts if loading fails or for unit testing.
     """
     try:
-        # Load the dataset
-        ds = load_dataset(dataset_path, dataset_name, split=split)
+        if dataset_name is not None:
+            ds = load_dataset(dataset_path, dataset_name, split=split)
+        else:
+            ds = load_dataset(dataset_path, split=split)
         # Extract text column
         if "text" in ds.column_names:
             return ds["text"]  # type: ignore[no-any-return]
@@ -243,6 +248,96 @@ def load_french_dataset(
             "Les jetons sont découpés au niveau de l'octet pour gérer les élisions du français.",
             "Les architectures modernes de réseaux de neurones utilisent le mécanisme d'attention.",
         ]
+
+
+def load_dataset_mix(
+    data_mix: List[DatasetMixEntry],
+    total_examples: Union[int, str] = "all",
+    default_split: str = "train",
+    seed: int = 42,
+    fallback_texts_per_dataset: Optional[Dict[str, List[str]]] = None,
+) -> List[str]:
+    """
+    Loads and mixes multiple datasets according to configured percentages.
+    
+    Args:
+        data_mix: List of DatasetMixEntry specifying dataset_path, dataset_name, percentage, and split.
+        total_examples: Total number of examples to sample across all datasets (e.g. 1000 or "all").
+        default_split: Default dataset split if entry.split is not provided (default: "train").
+        seed: Deterministic random seed for shuffling and interleaving mixed texts.
+        fallback_texts_per_dataset: Optional dictionary of fallback texts keyed by dataset path or name.
+        
+    Returns:
+        List of mixed and shuffled text strings.
+    """
+    if not data_mix:
+        raise ValueError("data_mix cannot be empty.")
+
+    total_pct = sum(entry.percentage for entry in data_mix)
+    for entry in data_mix:
+        if entry.percentage < 0:
+            raise ValueError(
+                f"Dataset percentage must be non-negative, got {entry.percentage} for {entry.dataset_path}"
+            )
+    if total_pct <= 0:
+        raise ValueError("Total percentage sum must be greater than zero.")
+
+    is_all = False
+    target_total: Optional[int] = None
+    if isinstance(total_examples, str):
+        val_str = total_examples.strip().lower()
+        if val_str in ("all", "full", "none", "0"):
+            is_all = True
+        elif val_str.isdigit():
+            target_total = int(val_str)
+        else:
+            is_all = True
+    elif isinstance(total_examples, int):
+        if total_examples <= 0:
+            is_all = True
+        else:
+            target_total = total_examples
+
+    normalized_weights = [entry.percentage / total_pct for entry in data_mix]
+    all_texts: List[str] = []
+
+    for i, entry in enumerate(data_mix):
+        weight = normalized_weights[i]
+        if weight == 0:
+            continue
+
+        if is_all or target_total is None:
+            split = entry.split or default_split
+        else:
+            count = max(1, round(target_total * weight))
+            if entry.split:
+                split = entry.split
+            else:
+                split = f"{default_split}[:{count}]"
+
+        key = f"{entry.dataset_path}/{entry.dataset_name}" if entry.dataset_name else entry.dataset_path
+        fb = fallback_texts_per_dataset.get(key) if fallback_texts_per_dataset else None
+
+        logger.info(
+            f"Loading dataset mix component '{entry.dataset_path}' (name={entry.dataset_name}, "
+            f"percentage={entry.percentage:.1f}%, weight={weight:.4f}, split='{split}')..."
+        )
+        texts = load_french_dataset(
+            dataset_path=entry.dataset_path,
+            dataset_name=entry.dataset_name,
+            split=split,
+            fallback_texts=fb,
+        )
+        all_texts.extend(texts)
+
+    rng = random.Random(seed)
+    rng.shuffle(all_texts)
+
+    if not is_all and target_total is not None and len(all_texts) > target_total:
+        all_texts = all_texts[:target_total]
+
+    logger.info(f"Loaded {len(all_texts)} total texts across {len(data_mix)} dataset mix sources.")
+    return all_texts
 
 
 def get_dataloader(
