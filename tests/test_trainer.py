@@ -429,5 +429,7 @@ def test_cumulative_average_train_loss():
         trainer.train_epoch(epoch=1, global_step=step1)
         assert trainer.total_train_steps == 4
 
+        trainer.close()
+
 
 
