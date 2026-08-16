@@ -125,7 +125,7 @@ def load_model_and_tokenizer(
         model_id, is_fast=True, truncation=True, max_length=max_len
     )
     model = AutoModelForCausalLM.from_pretrained(
-        model_id, device_map="auto", torch_dtype=dtype
+        model_id, device_map="auto", dtype=dtype
     ).eval()  # type: ignore[no-untyped-call]
 
     if hasattr(model, "generation_config") and model.generation_config is not None:
