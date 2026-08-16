@@ -249,3 +249,48 @@ def test_load_sft_conversations_file_handling(tmp_path):
     loaded = load_sft_conversations(str(json_path))
     assert len(loaded) == 1
     assert loaded[0][0]["content"] == "Test user"
+
+
+def test_sft_checkpoint_rotation_logic(tmp_path):
+    import os
+
+    output_dir = str(tmp_path / "checkpoints_sft")
+    os.makedirs(output_dir, exist_ok=True)
+    best_checkpoints = []
+    max_checkpoints = 5
+
+    def mock_save_if_better(step_idx: int, current_loss: float):
+        checkpoint_name = f"sft_checkpoint_step_{step_idx}_loss_{current_loss:.4f}.pt"
+        checkpoint_path = os.path.join(output_dir, checkpoint_name)
+        should_save = False
+        if len(best_checkpoints) < max_checkpoints:
+            should_save = True
+        else:
+            worst = max(best_checkpoints, key=lambda x: x["loss"])
+            if current_loss < worst["loss"]:
+                should_save = True
+                if os.path.exists(worst["path"]):
+                    os.remove(worst["path"])
+                best_checkpoints.remove(worst)
+        if should_save:
+            with open(checkpoint_path, "w") as f:
+                f.write("mock_checkpoint")
+            best_checkpoints.append({"path": checkpoint_path, "loss": current_loss, "step": step_idx})
+        return should_save
+
+    # Save 5 checkpoints
+    for step, loss in enumerate([2.5, 2.2, 2.0, 1.8, 1.6], start=1):
+        assert mock_save_if_better(step, loss) is True
+
+    assert len(os.listdir(output_dir)) == 5
+
+    # Worse checkpoint (loss=3.0) -> not saved
+    assert mock_save_if_better(6, 3.0) is False
+    assert len(os.listdir(output_dir)) == 5
+
+    # Better checkpoint (loss=1.2) -> replaces step 1 (loss=2.5)
+    assert mock_save_if_better(7, 1.2) is True
+    assert len(os.listdir(output_dir)) == 5
+    files = os.listdir(output_dir)
+    assert not any("loss_2.5000" in f for f in files)
+    assert any("loss_1.2000" in f for f in files)

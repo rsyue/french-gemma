@@ -277,14 +277,10 @@ class Pretrainer:
                             self.writer.add_scalar("Speed/train_seqs_per_sec", throughput, global_step)
                     self.last_log_time = time.time()
 
-                # Periodic Evaluation
+                # Combined Periodic Evaluation and Best Checkpoint Saving
                 if global_step % self.eval_interval == 0:
                     self.evaluate(global_step)
                     self.model.train()
-
-                # Periodic Checkpoint
-                if global_step % self.save_interval == 0:
-                    self.save_checkpoint(global_step, perplexity=float("inf"))
 
                 accum_loss = 0.0
                 accum_batches_count = 0
@@ -370,10 +366,13 @@ class Pretrainer:
             self.writer.add_scalar("Perplexity/val", perplexity, global_step)
             self.writer.add_text("Generation/val", generated, global_step)
 
-        # Manage best checkpoints
-        self.save_best_perplexity_checkpoint(global_step, perplexity)
-        if self.latest_train_loss != float("inf"):
-            self.save_best_loss_checkpoint(global_step, self.latest_train_loss)
+        # Manage best checkpoints on evaluation: save if qualifying for top max_checkpoints (default 5)
+        self.save_best_checkpoint(
+            global_step=global_step,
+            metric=perplexity if perplexity != float("inf") else avg_loss,
+            metric_name="ppl" if perplexity != float("inf") else "loss",
+            metrics_dict={"perplexity": perplexity, "loss": avg_loss},
+        )
 
         return perplexity
 
@@ -394,7 +393,6 @@ class Pretrainer:
         if isinstance(raw_model, nn.parallel.DistributedDataParallel):
             raw_model = raw_model.module
 
-
         # Ensure the raw model config architectures is set to Gemma3ForCausalLM
         if hasattr(raw_model, "config") and raw_model.config is not None:
             raw_model.config.architectures = ["Gemma3ForCausalLM"]
@@ -413,7 +411,6 @@ class Pretrainer:
                 raw_model.config.save_pretrained(checkpoint_path)
             except Exception as e:
                 logger.warning(f"Failed to save Hugging Face config: {e}")
-                # Save as standard dict fallback
                 try:
                     import json
                     with open(os.path.join(checkpoint_path, "config.json"), "w") as f:
@@ -429,7 +426,6 @@ class Pretrainer:
         if self.tokenizer is not None and hasattr(self.tokenizer, "save_pretrained"):
             self.tokenizer.save_pretrained(checkpoint_path)
 
-
         # Save training state (optimizer, scheduler, metrics)
         training_state = {
             "global_step": global_step,
@@ -442,22 +438,34 @@ class Pretrainer:
         torch.save(training_state, os.path.join(checkpoint_path, "training_state.pt"))
         logger.info(f"Hugging Face compatible checkpoint directory saved at: {checkpoint_path}")
 
-    def save_best_perplexity_checkpoint(self, global_step: int, perplexity: float) -> None:
+    def save_best_checkpoint(
+        self,
+        global_step: int,
+        metric: float,
+        metric_name: str = "ppl",
+        metrics_dict: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         """
-        Saves a checkpoint and retains only the 2 best checkpoints based on perplexity.
+        Saves a checkpoint and retains only the top max_checkpoints (default 5) best checkpoints.
+        If max_checkpoints is reached and the new metric is better than the worst of the top 5,
+        the worst checkpoint is deleted from disk to make room for the new one.
         """
         if not self.is_main_process:
-            return
+            return False
 
-        checkpoint_name = f"checkpoint-step-{global_step}-ppl-{perplexity:.2f}"
+        checkpoint_name = (
+            f"checkpoint-step-{global_step}-{metric_name}-{metric:.2f}"
+            if metric_name == "ppl"
+            else f"checkpoint-step-{global_step}-{metric_name}-{metric:.4f}"
+        )
         checkpoint_path = os.path.join(self.output_dir, checkpoint_name)
 
         should_save = False
-        if len(self.best_ppl_checkpoints) < 2:
+        if len(self.best_checkpoints) < self.max_checkpoints:
             should_save = True
         else:
-            worst = max(self.best_ppl_checkpoints, key=lambda x: x["perplexity"])
-            if perplexity < worst["perplexity"]:
+            worst = max(self.best_checkpoints, key=lambda x: x["metric"])
+            if metric < worst["metric"]:
                 should_save = True
                 worst_path = worst["path"]
                 if os.path.exists(worst_path):
@@ -468,61 +476,29 @@ class Pretrainer:
                             shutil.rmtree(worst_path)
                         else:
                             os.remove(worst_path)
-                        logger.info(f"Removed worst perplexity checkpoint: {worst_path}")
+                        logger.info(f"Removed worst checkpoint ({worst['metric']:.4f}) to make room: {worst_path}")
                     except Exception as e:
-                        logger.warning(f"Failed to delete checkpoint {worst_path}: {e}")
-                self.best_ppl_checkpoints.remove(worst)
+                        logger.warning(f"Failed to delete worst checkpoint {worst_path}: {e}")
+                self.best_checkpoints.remove(worst)
 
         if should_save:
-            self.save_checkpoint_dir(checkpoint_path, global_step, {"perplexity": perplexity})
-            self.best_ppl_checkpoints.append({"path": checkpoint_path, "perplexity": perplexity})
-            logger.info(f"Saved new best perplexity checkpoint: {checkpoint_path}")
+            payload = metrics_dict if metrics_dict is not None else {metric_name: metric}
+            self.save_checkpoint_dir(checkpoint_path, global_step, payload)
+            self.best_checkpoints.append({"path": checkpoint_path, "metric": metric, "step": global_step})
+            logger.info(f"Saved new best checkpoint ({metric_name}={metric:.4f}): {checkpoint_path}")
+            return True
         else:
-            logger.info(f"No improvement in perplexity (current: {perplexity:.4f}). Leaving checkpoints in place.")
+            logger.info(
+                f"No improvement in {metric_name} (current: {metric:.4f}). "
+                f"Leaving top {len(self.best_checkpoints)} checkpoints in place."
+            )
+            return False
+
+    def save_best_perplexity_checkpoint(self, global_step: int, perplexity: float) -> None:
+        self.save_best_checkpoint(global_step, perplexity, metric_name="ppl")
 
     def save_best_loss_checkpoint(self, global_step: int, train_loss: float) -> None:
-        """
-        Saves a checkpoint and retains only the 3 best checkpoints based on training loss.
-        """
-        if not self.is_main_process:
-            return
-
-        checkpoint_name = f"checkpoint-step-{global_step}-loss-{train_loss:.4f}"
-        checkpoint_path = os.path.join(self.output_dir, checkpoint_name)
-
-        should_save = False
-        if len(self.best_loss_checkpoints) < 3:
-            should_save = True
-        else:
-            worst = max(self.best_loss_checkpoints, key=lambda x: x["loss"])
-            if train_loss < worst["loss"]:
-                should_save = True
-                worst_path = worst["path"]
-                if os.path.exists(worst_path):
-                    try:
-                        import shutil
-
-                        if os.path.isdir(worst_path):
-                            shutil.rmtree(worst_path)
-                        else:
-                            os.remove(worst_path)
-                        logger.info(f"Removed worst training loss checkpoint: {worst_path}")
-                    except Exception as e:
-                        logger.warning(f"Failed to delete checkpoint {worst_path}: {e}")
-                self.best_loss_checkpoints.remove(worst)
-
-        if should_save:
-            self.save_checkpoint_dir(checkpoint_path, global_step, {"loss": train_loss})
-            self.best_loss_checkpoints.append({"path": checkpoint_path, "loss": train_loss})
-            logger.info(f"Saved new best training loss checkpoint: {checkpoint_path}")
-        else:
-            logger.info(f"No improvement in training loss (current: {train_loss:.4f}). Leaving checkpoints in place.")
-
-    def save_best_checkpoint(self, global_step: int, perplexity: float) -> None:
-        """
-        Saves a checkpoint and retains only the 2 best checkpoints based on perplexity (backward compatible).
-        """
-        self.save_best_perplexity_checkpoint(global_step, perplexity)
+        self.save_best_checkpoint(global_step, train_loss, metric_name="loss")
 
     def save_checkpoint(self, global_step: int, perplexity: float = float("inf")) -> None:
         """

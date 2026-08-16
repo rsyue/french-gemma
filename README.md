@@ -16,7 +16,7 @@ This project implements architectures and practices from the **Gemma 3 Paper**: 
 6.  **Un-frozen Pretraining by Default**: Runs pretraining without layer freezing by default for max model capacity (optional layer freezing schedules can still be configured).
 7.  **Robust Distributed Pretraining (DDP)**: Defers `dist.init_process_group` until rank 0 finishes data preparation, utilizing filesystem sentinel polling and configurable `dist_timeout_seconds` to eliminate NCCL communication timeouts.
 8.  **Advanced Training Loops**: Full support for mixed-precision (AMP) training, gradient accumulation, gradient clipping, AdamW optimizer, and Cosine Annealing with Warm Restarts and Warmup.
-9.  **Log & Checkpoint Management**: Reports progress to TensorBoard and retains only the **three best checkpoints** based on validation perplexity.
+9.  **Combined Evaluation & Top-5 Checkpoint Management**: Reports progress at regular log intervals and runs evaluation at combined evaluation/save intervals, retaining only the **five best checkpoints** based on evaluation metrics (perplexity/loss) and deleting the worst when an improved checkpoint is saved.
 10. **Proportional Multi-Dataset Mixing**: Supports configuring multi-dataset mixtures (e.g. Wikipedia 50%, OSCAR 30%, C4 20%) with percentage weights via inline YAML or standalone `--data-mix` configs with deterministic interleaving.
 11. **Supervised Fine-Tuning (SFT)**: Turn-based dialogue fine-tuning (`train/sft.py`) utilizing Gemma 3 turn markers (`<start_of_turn>`, `<end_of_turn>`) and prompt loss masking (`labels = -100` on user tokens).
 12. **Direct Preference Optimization (DPO)**: Alignment and RL optimization (`train/dpo.py`) using frozen reference-model log-probabilities and $\beta$ reward margins.

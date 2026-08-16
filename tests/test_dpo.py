@@ -209,3 +209,48 @@ def test_load_dpo_pairs_file_handling(tmp_path):
     loaded = load_dpo_pairs(str(json_path))
     assert len(loaded) == 1
     assert loaded[0]["prompt"] == "Test prompt"
+
+
+def test_dpo_checkpoint_rotation_logic(tmp_path):
+    import os
+
+    output_dir = str(tmp_path / "checkpoints_dpo")
+    os.makedirs(output_dir, exist_ok=True)
+    best_checkpoints = []
+    max_checkpoints = 5
+
+    def mock_save_if_better(step_idx: int, current_loss: float):
+        checkpoint_name = f"dpo_checkpoint_step_{step_idx}_loss_{current_loss:.4f}.pt"
+        checkpoint_path = os.path.join(output_dir, checkpoint_name)
+        should_save = False
+        if len(best_checkpoints) < max_checkpoints:
+            should_save = True
+        else:
+            worst = max(best_checkpoints, key=lambda x: x["loss"])
+            if current_loss < worst["loss"]:
+                should_save = True
+                if os.path.exists(worst["path"]):
+                    os.remove(worst["path"])
+                best_checkpoints.remove(worst)
+        if should_save:
+            with open(checkpoint_path, "w") as f:
+                f.write("mock_dpo_checkpoint")
+            best_checkpoints.append({"path": checkpoint_path, "loss": current_loss, "step": step_idx})
+        return should_save
+
+    # Save 5 checkpoints
+    for step, loss in enumerate([1.5, 1.3, 1.1, 0.9, 0.7], start=1):
+        assert mock_save_if_better(step, loss) is True
+
+    assert len(os.listdir(output_dir)) == 5
+
+    # Worse checkpoint (loss=2.0) -> not saved
+    assert mock_save_if_better(6, 2.0) is False
+    assert len(os.listdir(output_dir)) == 5
+
+    # Better checkpoint (loss=0.4) -> replaces step 1 (loss=1.5)
+    assert mock_save_if_better(7, 0.4) is True
+    assert len(os.listdir(output_dir)) == 5
+    files = os.listdir(output_dir)
+    assert not any("loss_1.5000" in f for f in files)
+    assert any("loss_0.4000" in f for f in files)

@@ -9,7 +9,7 @@ import json
 import logging
 import os
 import time
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 from transformers import AutoTokenizer
@@ -174,6 +174,42 @@ def main() -> None:
     step = 0
     t0 = time.time()
 
+    os.makedirs(config.output_dir, exist_ok=True)
+    best_checkpoints: List[Dict[str, Any]] = []
+
+    def save_if_better(step_idx: int, current_loss: float) -> None:
+        checkpoint_name = f"dpo_checkpoint_step_{step_idx}_loss_{current_loss:.4f}.pt"
+        checkpoint_path = os.path.join(config.output_dir, checkpoint_name)
+        should_save = False
+        if len(best_checkpoints) < config.max_checkpoints:
+            should_save = True
+        else:
+            worst = max(best_checkpoints, key=lambda x: x["loss"])
+            if current_loss < worst["loss"]:
+                should_save = True
+                if os.path.exists(worst["path"]):
+                    try:
+                        os.remove(worst["path"])
+                        logger.info(f"Removed worst DPO checkpoint: {worst['path']}")
+                    except Exception as e:
+                        logger.warning(f"Failed to remove checkpoint {worst['path']}: {e}")
+                best_checkpoints.remove(worst)
+
+        if should_save:
+            torch.save(
+                {
+                    "step": step_idx,
+                    "model_state_dict": policy_model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "loss": current_loss,
+                    "metrics": strategy.latest_metrics,
+                    "config": config,
+                },
+                checkpoint_path,
+            )
+            best_checkpoints.append({"path": checkpoint_path, "loss": current_loss, "step": step_idx})
+            logger.info(f"Saved new best DPO checkpoint (loss={current_loss:.4f}): {checkpoint_path}")
+
     logger.info(f"Starting DPO alignment loop for {config.max_steps} steps...")
     while step < config.max_steps:
         for batch in dataloader:
@@ -192,7 +228,7 @@ def main() -> None:
             scheduler.step()
             step += 1
 
-            if step % config.log_interval == 0 or step == config.max_steps:
+            if step % config.log_interval == 0:
                 current_lr = scheduler.get_last_lr()[0]
                 elapsed = time.time() - t0
                 metrics = strategy.latest_metrics
@@ -204,18 +240,11 @@ def main() -> None:
                     f"LR: {current_lr:.2e} | Elapsed: {elapsed:.1f}s"
                 )
 
-    os.makedirs(config.output_dir, exist_ok=True)
-    save_path = os.path.join(config.output_dir, f"dpo_checkpoint_step_{step}.pt")
-    torch.save(
-        {
-            "step": step,
-            "model_state_dict": policy_model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "config": config,
-        },
-        save_path,
-    )
-    logger.info(f"DPO alignment completed. Model checkpoint saved to {save_path}")
+            # Combined eval and save interval
+            if step % config.eval_interval == 0 or step == config.max_steps:
+                save_if_better(step, loss.item())
+
+    logger.info(f"DPO alignment completed. Top {len(best_checkpoints)} checkpoints retained in {config.output_dir}")
 
 
 if __name__ == "__main__":
