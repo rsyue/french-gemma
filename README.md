@@ -30,8 +30,10 @@ This project implements architectures and practices from the **Gemma 3 Paper**: 
 french_gemma/
 ├── configs/
 │   ├── mlx_config.yaml         # macOS (MPS, bfloat16, pin_memory disabled)
-│   ├── amd_config.yaml         # AMD ROCm (CUDA, bfloat16, compiled model)
-│   └── nvidia_config.yaml      # Nvidia Jetson Orin Nano (CUDA, float16)
+│   ├── amd_config.yaml         # AMD ROCm (CUDA, bfloat16, max_seq_len 4096)
+│   ├── nvidia_config.yaml      # Nvidia Jetson Orin Nano (CUDA, float16)
+│   ├── sft_config.yaml         # SFT turn-based fine-tuning config (save_dir: ./checkpoints/sft)
+│   └── dpo_config.yaml         # DPO preference alignment config (save_dir: ./checkpoints/dpo)
 ├── hooks/
 │   └── README.md               # Developer environment commands and rules
 ├── train/
@@ -114,6 +116,17 @@ The primary way to run pretraining is via the `train.pretrain` module. All confi
 ```bash
 # Run pretraining using macOS MPS config with CLI parameter overrides
 source .venv/bin/activate && python -m train.pretrain --config configs/mlx_config.yaml --model google/gemma-3-270m-it --batch-size 4 --learning-rate 2e-4
+```
+
+### Modality-Specific Checkpoint Routing & `--save-dir`
+Checkpoints are automatically organized into dedicated subdirectories under `./checkpoints`:
+- Pretraining (`train.pretrain`): `./checkpoints/pretrain`
+- SFT (`train.sft`): `./checkpoints/sft`
+- DPO (`train.dpo`): `./checkpoints/dpo`
+
+You can override the target directory on any entrypoint using `--save-dir` (or `--output-dir`):
+```bash
+source .venv/bin/activate && python -m train.pretrain --config configs/nvidia_config.yaml --save-dir ./checkpoints/my_run
 ```
 
 ### Full Dataset Training & Custom Dataset Splits
