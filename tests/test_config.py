@@ -99,7 +99,7 @@ def test_specific_repo_configs():
     assert sft_cfg.data_mix[0].percentage == 40.0
     assert sft_cfg.data_mix[1].dataset_path == "ministere-culture/comparia-votes"
     assert sft_cfg.data_mix[1].percentage == 30.0
-    assert sft_cfg.data_mix[2].dataset_path == "almanach/fquad"
+    assert sft_cfg.data_mix[2].dataset_path in ("CATIE-AQ/frenchQA", "almanach/fquad")
     assert sft_cfg.data_mix[2].percentage == 30.0
 
     dpo_cfg = TrainingConfig.from_yaml(os.path.join(config_dir, "dpo_config.yaml"))

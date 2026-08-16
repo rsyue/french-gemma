@@ -14,8 +14,8 @@ amp_dtype: "bfloat16"
 log_interval: 20
 save_interval: 500
 eval_interval: 500
-num_workers: 2
-prefetch_factor: 2
+num_workers: 0
+prefetch_factor: null
 pin_memory: true
 vocab_size: 50000
 dist_timeout_seconds: 7200
@@ -30,7 +30,7 @@ data_mix:
   - dataset_path: "ministere-culture/comparia-votes"
     percentage: 30.0
     split: "train"
-  - dataset_path: "almanach/fquad"
+  - dataset_path: "CATIE-AQ/frenchQA"
     percentage: 30.0
     split: "train"
 

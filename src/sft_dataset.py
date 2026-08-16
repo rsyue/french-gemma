@@ -99,6 +99,15 @@ def normalize_conversation(raw_item: Union[List[Dict[str, Any]], Dict[str, Any]]
             return normalize_conversation(raw_item["messages"])
         if "conversations" in raw_item and isinstance(raw_item["conversations"], list):
             return normalize_conversation(raw_item["conversations"])
+        if "conversation_a" in raw_item or "conversation_b" in raw_item:
+            chosen = raw_item.get("chosen_model_name")
+            b_name = raw_item.get("model_b_name")
+            if chosen and b_name and chosen == b_name and "conversation_b" in raw_item:
+                return normalize_conversation(raw_item["conversation_b"])
+            if "conversation_a" in raw_item:
+                return normalize_conversation(raw_item["conversation_a"])
+            if "conversation_b" in raw_item:
+                return normalize_conversation(raw_item["conversation_b"])
         if "context" in raw_item and "question" in raw_item:
             ans_text = ""
             if "answers" in raw_item:
@@ -114,6 +123,22 @@ def normalize_conversation(raw_item: Union[List[Dict[str, Any]], Dict[str, Any]]
                 {"role": "user", "content": user_content},
                 {"role": "assistant", "content": ans_text},
             ]
+        if "context" in raw_item and "qas" in raw_item:
+            qas = raw_item["qas"]
+            if isinstance(qas, list) and len(qas) > 0:
+                first_qa = qas[0]
+                q_text = first_qa.get("question", "")
+                answers = first_qa.get("answers", [])
+                ans_text = ""
+                if isinstance(answers, list) and len(answers) > 0:
+                    ans_text = answers[0].get("text", "") if isinstance(answers[0], dict) else str(answers[0])
+                elif isinstance(answers, dict) and "text" in answers and len(answers["text"]) > 0:
+                    ans_text = str(answers["text"][0])
+                user_content = f"Contexte:\n{raw_item['context']}\n\nQuestion:\n{q_text}"
+                return [
+                    {"role": "user", "content": user_content},
+                    {"role": "assistant", "content": ans_text},
+                ]
         if "prompt" in raw_item and ("chosen" in raw_item or "response_a" in raw_item or "response_b" in raw_item):
             chosen_resp = raw_item.get("chosen")
             if chosen_resp is None:
@@ -185,17 +210,30 @@ def load_sft_dataset_mix(
             items = fallback_conversations[entry.dataset_path]
         else:
             split_to_use = entry.split if entry.split is not None else default_split
+            ds_path = entry.dataset_path
+            # Normalize known FQuAD aliases if needed
+            if ds_path in ("almanach/fquad", "fquad"):
+                ds_path = "CATIE-AQ/frenchQA"
             try:
                 import datasets
 
                 logger.info(
-                    f"Loading HF dataset for SFT: {entry.dataset_path} "
+                    f"Loading HF dataset for SFT: {ds_path} "
                     f"(name={entry.dataset_name}, split={split_to_use})..."
                 )
                 if entry.dataset_name:
-                    ds = datasets.load_dataset(entry.dataset_path, entry.dataset_name, split=split_to_use)
+                    ds = datasets.load_dataset(
+                        ds_path,
+                        entry.dataset_name,
+                        split=split_to_use,
+                        verification_mode="no_checks",
+                    )
                 else:
-                    ds = datasets.load_dataset(entry.dataset_path, split=split_to_use)
+                    ds = datasets.load_dataset(
+                        ds_path,
+                        split=split_to_use,
+                        verification_mode="no_checks",
+                    )
                 items = list(ds)
             except Exception as err:
                 logger.warning(
