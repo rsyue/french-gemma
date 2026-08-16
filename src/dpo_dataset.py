@@ -6,6 +6,7 @@ sequence-level log-probabilities for preference alignment training.
 """
 
 import logging
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -128,50 +129,160 @@ def normalize_dpo_pair(raw: Any) -> Tuple[str, str, str]:
     raise ValueError(f"Unsupported DPO preference record: {raw}")
 
 
+def batch_format_dpo_pairs(
+    pairs: List[Tuple[str, str, str]],
+    tokenizer: PreTrainedTokenizerFast,
+    max_seq_len: int = 2048,
+    ignore_index: int = -100,
+) -> List[Dict[str, List[int]]]:
+    """
+    Batched encoding and formatting for DPO preference pairs.
+    """
+    if not pairs:
+        return []
+
+    prompt_strs = [
+        f"<bos><start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
+        for prompt, _, _ in pairs
+    ]
+    chosen_strs = [f"{chosen}<end_of_turn>\n" for _, chosen, _ in pairs]
+    rejected_strs = [f"{rejected}<end_of_turn>\n" for _, _, rejected in pairs]
+
+    all_strs = prompt_strs + chosen_strs + rejected_strs
+    all_enc = tokenizer(all_strs, add_special_tokens=False)["input_ids"]
+
+    n = len(pairs)
+    p_enc = all_enc[:n]
+    c_enc = all_enc[n : 2 * n]
+    r_enc = all_enc[2 * n :]
+
+    pad_id = tokenizer.pad_token_id or 0
+    results: List[Dict[str, List[int]]] = []
+
+    for p_ids, c_ids, r_ids in zip(p_enc, c_enc, r_enc):
+        chosen_input = p_ids + c_ids
+        chosen_labels = [ignore_index] * len(p_ids) + c_ids
+        if len(chosen_input) > max_seq_len:
+            chosen_input = chosen_input[:max_seq_len]
+            chosen_labels = chosen_labels[:max_seq_len]
+        else:
+            pad_len = max_seq_len - len(chosen_input)
+            chosen_input = chosen_input + [pad_id] * pad_len
+            chosen_labels = chosen_labels + [ignore_index] * pad_len
+
+        rej_input = p_ids + r_ids
+        rej_labels = [ignore_index] * len(p_ids) + r_ids
+        if len(rej_input) > max_seq_len:
+            rej_input = rej_input[:max_seq_len]
+            rej_labels = rej_labels[:max_seq_len]
+        else:
+            pad_len = max_seq_len - len(rej_input)
+            rej_input = rej_input + [pad_id] * pad_len
+            rej_labels = rej_labels + [ignore_index] * pad_len
+
+        results.append(
+            {
+                "chosen_input_ids": chosen_input,
+                "chosen_labels": chosen_labels,
+                "rejected_input_ids": rej_input,
+                "rejected_labels": rej_labels,
+            }
+        )
+
+    return results
+
+
 class DPODataset(Dataset[Dict[str, torch.Tensor]]):
-    """PyTorch Dataset for Direct Preference Optimization."""
+    """
+    PyTorch Dataset for Direct Preference Optimization.
+    Supports batched tokenization and formatting with granular progress verbosity.
+    """
 
     def __init__(
         self,
         pairs: List[Any],
         tokenizer: PreTrainedTokenizerFast,
         max_seq_len: int = 2048,
+        batch_size: int = 2000,
     ) -> None:
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
         self.items: List[Dict[str, torch.Tensor]] = []
 
-        logger.info(f"Formatting {len(pairs)} DPO preference pairs...")
+        total_pairs = len(pairs)
+        logger.info(
+            f"Starting batched tokenization and formatting for {total_pairs:,} DPO preference pairs "
+            f"(chunk_size={batch_size}, max_seq_len={max_seq_len})..."
+        )
+
+        t_start = time.time()
         pad_id = tokenizer.pad_token_id or 0
+        skipped_count = 0
 
-        for raw in pairs:
-            prompt, chosen, rejected = normalize_dpo_pair(raw)
-            formatted = format_dpo_pair(
-                prompt=prompt,
-                chosen=chosen,
-                rejected=rejected,
-                tokenizer=tokenizer,
-                max_seq_len=max_seq_len,
+        for chunk_idx in range(0, total_pairs, batch_size):
+            chunk_t0 = time.time()
+            chunk_raw = pairs[chunk_idx : chunk_idx + batch_size]
+
+            valid_triplets: List[Tuple[str, str, str]] = []
+            for raw in chunk_raw:
+                try:
+                    p, c, r = normalize_dpo_pair(raw)
+                    valid_triplets.append((p, c, r))
+                except Exception as err:
+                    logger.debug(f"Skipping unparseable DPO preference pair: {err}")
+                    skipped_count += 1
+
+            if valid_triplets:
+                formatted_batch = batch_format_dpo_pairs(
+                    pairs=valid_triplets,
+                    tokenizer=tokenizer,
+                    max_seq_len=max_seq_len,
+                )
+
+                for item in formatted_batch:
+                    chosen_ids_t = torch.tensor(item["chosen_input_ids"], dtype=torch.long)
+                    chosen_labels_t = torch.tensor(item["chosen_labels"], dtype=torch.long)
+                    chosen_mask_t = (chosen_ids_t != pad_id).long()
+
+                    rej_ids_t = torch.tensor(item["rejected_input_ids"], dtype=torch.long)
+                    rej_labels_t = torch.tensor(item["rejected_labels"], dtype=torch.long)
+                    rej_mask_t = (rej_ids_t != pad_id).long()
+
+                    self.items.append(
+                        {
+                            "chosen_input_ids": chosen_ids_t,
+                            "chosen_labels": chosen_labels_t,
+                            "chosen_attention_mask": chosen_mask_t,
+                            "rejected_input_ids": rej_ids_t,
+                            "rejected_labels": rej_labels_t,
+                            "rejected_attention_mask": rej_mask_t,
+                        }
+                    )
+
+            chunk_time = time.time() - chunk_t0
+            processed_so_far = min(chunk_idx + batch_size, total_pairs)
+            pct = (processed_so_far / total_pairs) * 100.0
+            elapsed_total = time.time() - t_start
+            throughput = processed_so_far / max(1e-4, elapsed_total)
+
+            logger.info(
+                f"Tokenization Progress: [{processed_so_far:,}/{total_pairs:,}] ({pct:5.1f}%) | "
+                f"Chunk Time: {chunk_time:.2f}s | Throughput: {throughput:,.1f} pairs/s | "
+                f"Valid Indexed: {len(self.items):,}"
             )
 
-            chosen_ids_t = torch.tensor(formatted["chosen_input_ids"], dtype=torch.long)
-            chosen_labels_t = torch.tensor(formatted["chosen_labels"], dtype=torch.long)
-            chosen_mask_t = (chosen_ids_t != pad_id).long()
-
-            rej_ids_t = torch.tensor(formatted["rejected_input_ids"], dtype=torch.long)
-            rej_labels_t = torch.tensor(formatted["rejected_labels"], dtype=torch.long)
-            rej_mask_t = (rej_ids_t != pad_id).long()
-
-            self.items.append(
-                {
-                    "chosen_input_ids": chosen_ids_t,
-                    "chosen_labels": chosen_labels_t,
-                    "chosen_attention_mask": chosen_mask_t,
-                    "rejected_input_ids": rej_ids_t,
-                    "rejected_labels": rej_labels_t,
-                    "rejected_attention_mask": rej_mask_t,
-                }
+        total_time = time.time() - t_start
+        if len(self.items) == 0:
+            raise ValueError(
+                f"DPODataset contains 0 valid preference pairs after processing and filtering {total_pairs} items."
             )
+
+        logger.info(
+            f"Tokenization & formatting completed in {total_time:.2f}s "
+            f"(Avg: {total_pairs / max(1e-4, total_time):,.1f} pairs/s). "
+            f"Successfully indexed {len(self.items):,}/{total_pairs:,} valid preference pairs "
+            f"({skipped_count:,} skipped)."
+        )
 
     def __len__(self) -> int:
         return len(self.items)

@@ -11,13 +11,13 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
 from src.config import TrainingConfig
 from src.dataset import load_tokenizer_for_post_training
-from src.dpo_dataset import DPODataset, get_dpo_dataloader
+from src.dpo_dataset import DPODataset, get_dpo_dataloader, normalize_dpo_pair
 from src.model import FrenchGemmaModel
 from src.scheduler import get_cosine_warmup_scheduler
 from train.cli import parse_args_to_config
@@ -80,6 +80,54 @@ def load_dpo_pairs(data_path: Optional[str] = None) -> List[Any]:
     return DEFAULT_FRENCH_DPO_PAIRS
 
 
+def initialize_dpo_models(
+    config: TrainingConfig, vocab_size: int
+) -> Tuple[FrenchGemmaModel, FrenchGemmaModel]:
+    """
+    Initializes the policy model and frozen reference model for DPO.
+    Loads the pretrained/SFT checkpoint into the policy model if configured,
+    and sets up the frozen reference model (either from ref_model_id or cloned policy).
+    """
+    policy_model = FrenchGemmaModel(
+        model_id=config.model_id,
+        vocab_size=vocab_size,
+        embedding_noise_std=0.0,
+    )
+    if config.pretrained_model_path:
+        if os.path.exists(config.pretrained_model_path):
+            logger.info(f"Loading policy model weights from: {config.pretrained_model_path}")
+            policy_model.load_pretrained_checkpoint(config.pretrained_model_path)
+        else:
+            raise FileNotFoundError(
+                f"Specified pretrained_model_path does not exist: {config.pretrained_model_path}"
+            )
+    else:
+        logger.warning(
+            "No local pretrained/SFT checkpoint provided via --pretrained-model-path. "
+            f"Defaulting to base Gemma 3 checkpoint from HuggingFace: '{config.model_id}'."
+        )
+
+    policy_model.ensure_tokenizer_vocab_alignment(vocab_size)
+
+    ref_model_source = config.ref_model_id or config.model_id
+    ref_model = FrenchGemmaModel(
+        model_id=ref_model_source,
+        vocab_size=vocab_size,
+        embedding_noise_std=0.0,
+    )
+    if config.ref_model_id:
+        logger.info(f"Initialized distinct reference model from: {config.ref_model_id}")
+    else:
+        ref_model.load_state_dict(policy_model.state_dict())
+
+    ref_model.ensure_tokenizer_vocab_alignment(vocab_size)
+    ref_model.eval()
+    for param in ref_model.parameters():
+        param.requires_grad = False
+
+    return policy_model, ref_model
+
+
 def main() -> None:
     """Main CLI entrypoint for French Gemma 3 Direct Preference Optimization."""
     config: TrainingConfig = parse_args_to_config(modality="dpo")
@@ -93,45 +141,37 @@ def main() -> None:
     )
 
     logger.info(
-        f"DPO Alignment launched. Model: {config.model_id} | Beta: {config.dpo_beta} | "
-        f"Device: {config.device} | Max Seq Len: {config.max_sequence_length}"
+        f"DPO Training launched. Model: {config.model_id} | Device: {config.device} | "
+        f"Beta: {config.dpo_beta} | Label Smoothing: {config.dpo_label_smoothing}"
     )
 
-    tokenizer: Any = load_tokenizer_for_post_training(
+    tokenizer = load_tokenizer_for_post_training(
         model_id=config.model_id,
         data_cache_dir=config.data_cache_dir,
         pretrained_model_path=config.pretrained_model_path,
     )
+    pairs = load_dpo_pairs(config.dataset_path if config.dataset_path != "wikimedia/wikipedia" else None)
 
-    dpo_data_path = (
-        config.dataset_path
-        if config.dataset_path and config.dataset_path != "wikimedia/wikipedia"
-        else None
-    )
-    pairs = load_dpo_pairs(dpo_data_path)
     if pairs:
-        sample_pair = pairs[0]
-        logger.info("=" * 70)
-        logger.info("DPO Preference Pair Sample Verification (before tokenization):")
-        logger.info("-" * 70)
-        prompt_txt = sample_pair.get("prompt", "")
-        chosen_txt = sample_pair.get("chosen", "")
-        rejected_txt = sample_pair.get("rejected", "")
-        logger.info(f"  [Prompt]: {prompt_txt}")
-        logger.info(f"  [Chosen Response]: {chosen_txt}")
-        logger.info(f"  [Rejected Response]: {rejected_txt}")
-        logger.info("=" * 70)
+        first_pair = normalize_dpo_pair(pairs[0])
+        logger.info("=" * 80)
+        logger.info("ACTUAL LOADED PREFERENCE PAIR SAMPLE:")
+        logger.info("-" * 80)
+        logger.info(f"  [PROMPT]:\n    {first_pair[0]}")
+        logger.info(f"  [CHOSEN]:\n    {first_pair[1]}")
+        logger.info(f"  [REJECTED]:\n    {first_pair[2]}")
+        logger.info("=" * 80)
 
-    logger.info(
-        f"Tokenizing and indexing {len(pairs)} DPO preference pairs "
-        f"(max_sequence_length={config.max_sequence_length})..."
-    )
     dpo_dataset = DPODataset(
         pairs=pairs,
         tokenizer=tokenizer,
         max_seq_len=config.max_sequence_length,
     )
-    logger.info(f"Tokenization complete: {len(dpo_dataset)} active preference pairs indexed.")
+
+    if len(dpo_dataset) == 0:
+        raise ValueError(
+            "DPODataset contains 0 valid preference pairs after processing and filtering. Cannot train."
+        )
 
     dataloader = get_dpo_dataloader(
         dataset=dpo_dataset,
@@ -147,27 +187,9 @@ def main() -> None:
         f"(effective batch size: {config.batch_size * config.gradient_accumulation_steps})."
     )
 
-    logger.info("Initializing Policy Model for DPO...")
-    policy_model = FrenchGemmaModel(
-        model_id=config.model_id,
-        vocab_size=len(tokenizer),
-        embedding_noise_std=0.0,
-    )
-    policy_model.ensure_tokenizer_vocab_alignment(tokenizer)
+    policy_model, ref_model = initialize_dpo_models(config=config, vocab_size=len(tokenizer))
     policy_model = policy_model.to(config.device)
-
-    logger.info("Initializing Frozen Reference Model for DPO...")
-    ref_model = FrenchGemmaModel(
-        model_id=config.model_id,
-        vocab_size=len(tokenizer),
-        embedding_noise_std=0.0,
-    )
-    ref_model.ensure_tokenizer_vocab_alignment(tokenizer)
     ref_model = ref_model.to(config.device)
-    ref_model.load_state_dict(policy_model.state_dict())
-    ref_model.eval()
-    for param in ref_model.parameters():
-        param.requires_grad = False
 
     strategy = DPOStrategy(
         ref_model=ref_model,
@@ -262,12 +284,6 @@ def main() -> None:
             for batch in dataloader:
                 if step >= config.max_steps:
                     break
-
-                if (step == 0 or step < 3) and config.gradient_accumulation_steps > 1:
-                    logger.info(
-                        f"[Step {step + 1}/{config.max_steps}] Processing micro-batch "
-                        f"{accum_batches + 1}/{config.gradient_accumulation_steps}..."
-                    )
 
                 prepared_batch = strategy.prepare_batch(batch, config.device)
                 with torch.amp.autocast(  # type: ignore[attr-defined]

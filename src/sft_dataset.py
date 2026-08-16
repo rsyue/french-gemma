@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import random
+import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -85,13 +86,24 @@ def normalize_conversation(raw_item: Union[List[Dict[str, Any]], Dict[str, Any]]
         for turn in raw_item:
             if isinstance(turn, dict):
                 if "from" in turn and "value" in turn:
-                    role = "user" if turn["from"] in ("human", "user") else "assistant"
+                    from_val = str(turn["from"]).strip().lower()
+                    if from_val in ("human", "user"):
+                        role = "user"
+                    elif from_val in ("system",):
+                        role = "system"
+                    else:
+                        role = "assistant"
                     messages.append({"role": role, "content": str(turn["value"])})
                 elif "role" in turn and "content" in turn:
-                    raw_role = str(turn["role"])
-                    role = "user" if raw_role in ("human", "user") else (
-                        "assistant" if raw_role in ("assistant", "model") else raw_role
-                    )
+                    raw_role = str(turn["role"]).strip().lower()
+                    if raw_role in ("human", "user"):
+                        role = "user"
+                    elif raw_role in ("system",):
+                        role = "system"
+                    elif raw_role in ("assistant", "model"):
+                        role = "assistant"
+                    else:
+                        role = raw_role
                     messages.append({"role": role, "content": str(turn["content"])})
         return messages
     if isinstance(raw_item, dict):
@@ -102,7 +114,14 @@ def normalize_conversation(raw_item: Union[List[Dict[str, Any]], Dict[str, Any]]
         if "conversation_a" in raw_item or "conversation_b" in raw_item:
             chosen = raw_item.get("chosen_model_name")
             b_name = raw_item.get("model_b_name")
-            if chosen and b_name and chosen == b_name and "conversation_b" in raw_item:
+            winner = str(raw_item.get("winner", "")).strip().lower()
+            is_b_winner = (chosen and b_name and chosen == b_name) or winner in (
+                "model_b",
+                "b",
+                "model_b_preferred",
+                "response_b",
+            )
+            if is_b_winner and "conversation_b" in raw_item:
                 return normalize_conversation(raw_item["conversation_b"])
             if "conversation_a" in raw_item:
                 return normalize_conversation(raw_item["conversation_a"])
@@ -112,8 +131,12 @@ def normalize_conversation(raw_item: Union[List[Dict[str, Any]], Dict[str, Any]]
             ans_text = ""
             if "answers" in raw_item:
                 ans = raw_item["answers"]
-                if isinstance(ans, dict) and "text" in ans and len(ans["text"]) > 0:
-                    ans_text = str(ans["text"][0])
+                if isinstance(ans, dict) and "text" in ans:
+                    txt_field = ans["text"]
+                    if isinstance(txt_field, list) and len(txt_field) > 0:
+                        ans_text = str(txt_field[0])
+                    elif isinstance(txt_field, str):
+                        ans_text = txt_field
                 elif isinstance(ans, list) and len(ans) > 0:
                     ans_text = str(ans[0])
                 elif isinstance(ans, str):
@@ -131,9 +154,17 @@ def normalize_conversation(raw_item: Union[List[Dict[str, Any]], Dict[str, Any]]
                 answers = first_qa.get("answers", [])
                 ans_text = ""
                 if isinstance(answers, list) and len(answers) > 0:
-                    ans_text = answers[0].get("text", "") if isinstance(answers[0], dict) else str(answers[0])
-                elif isinstance(answers, dict) and "text" in answers and len(answers["text"]) > 0:
-                    ans_text = str(answers["text"][0])
+                    first_ans = answers[0]
+                    if isinstance(first_ans, dict):
+                        ans_text = str(first_ans.get("text", ""))
+                    else:
+                        ans_text = str(first_ans)
+                elif isinstance(answers, dict) and "text" in answers:
+                    txt_field = answers["text"]
+                    if isinstance(txt_field, list) and len(txt_field) > 0:
+                        ans_text = str(txt_field[0])
+                    else:
+                        ans_text = str(txt_field)
                 user_content = f"Contexte:\n{raw_item['context']}\n\nQuestion:\n{q_text}"
                 return [
                     {"role": "user", "content": user_content},
@@ -142,8 +173,8 @@ def normalize_conversation(raw_item: Union[List[Dict[str, Any]], Dict[str, Any]]
         if "prompt" in raw_item and ("chosen" in raw_item or "response_a" in raw_item or "response_b" in raw_item):
             chosen_resp = raw_item.get("chosen")
             if chosen_resp is None:
-                winner = raw_item.get("winner", "model_a")
-                if winner == "model_b":
+                winner = str(raw_item.get("winner", "model_a")).strip().lower()
+                if winner in ("model_b", "b", "response_b"):
                     chosen_resp = raw_item.get("response_b") or ""
                 else:
                     chosen_resp = raw_item.get("response_a") or ""
@@ -310,7 +341,7 @@ def format_messages_with_prompt_mask(
     all_input_ids: List[int] = []
     all_labels: List[int] = []
 
-    bos_token = "<bos>"
+    bos_token = tokenizer.bos_token or "<bos>"
     bos_ids = tokenizer.encode(bos_token, add_special_tokens=False) if bos_token else []
     all_input_ids.extend(bos_ids)
     all_labels.extend([ignore_index] * len(bos_ids))
@@ -340,12 +371,10 @@ def format_messages_with_prompt_mask(
             all_input_ids.extend(content_ids)
             all_labels.extend(content_ids)
 
-    # Truncate to max_seq_len
     if len(all_input_ids) > max_seq_len:
         all_input_ids = all_input_ids[:max_seq_len]
         all_labels = all_labels[:max_seq_len]
 
-    # Optional pad to max_seq_len
     if pad_to_max:
         pad_id = tokenizer.pad_token_id or 0
         pad_len = max(0, max_seq_len - len(all_input_ids))
@@ -356,9 +385,89 @@ def format_messages_with_prompt_mask(
     return all_input_ids, all_labels
 
 
+def batch_format_messages_with_prompt_mask(
+    conversations: List[List[Dict[str, str]]],
+    tokenizer: PreTrainedTokenizerFast,
+    max_seq_len: int = 2048,
+    ignore_index: int = -100,
+) -> List[Tuple[List[int], List[int]]]:
+    """
+    Batched encoding of conversation turns into input_ids and labels with prompt masking.
+    Batches all turn strings across conversations into a single tokenizer call to maximize throughput.
+
+    Returns:
+        List of (input_ids, labels) tuples, one per input conversation.
+    """
+    if not conversations:
+        return []
+
+    bos_token = tokenizer.bos_token or "<bos>"
+    bos_ids = tokenizer.encode(bos_token, add_special_tokens=False) if bos_token else []
+    model_prefix_str = "<start_of_turn>model\n"
+    model_prefix_ids = tokenizer.encode(model_prefix_str, add_special_tokens=False)
+
+    all_turn_strings: List[str] = []
+    # Plan tracks per conversation: list of (is_masked: bool, is_static: bool, static_ids: List[int], turn_idx: int)
+    conv_plans: List[List[Tuple[bool, bool, List[int], int]]] = []
+
+    for messages in conversations:
+        plan: List[Tuple[bool, bool, List[int], int]] = []
+        if bos_ids:
+            plan.append((True, True, bos_ids, -1))
+
+        for message in messages:
+            role = message.get("role", "user")
+            content = message.get("content", "")
+
+            if role == "system":
+                turn_str = f"<start_of_turn>system\n{content}<end_of_turn>\n"
+                turn_idx = len(all_turn_strings)
+                all_turn_strings.append(turn_str)
+                plan.append((True, False, [], turn_idx))
+            elif role == "user":
+                turn_str = f"<start_of_turn>user\n{content}<end_of_turn>\n"
+                turn_idx = len(all_turn_strings)
+                all_turn_strings.append(turn_str)
+                plan.append((True, False, [], turn_idx))
+            elif role in ("model", "assistant"):
+                plan.append((True, True, model_prefix_ids, -1))
+                turn_str = f"{content}<end_of_turn>\n"
+                turn_idx = len(all_turn_strings)
+                all_turn_strings.append(turn_str)
+                plan.append((False, False, [], turn_idx))
+
+        conv_plans.append(plan)
+
+    if all_turn_strings:
+        batch_encodings = tokenizer(all_turn_strings, add_special_tokens=False)["input_ids"]
+    else:
+        batch_encodings = []
+
+    results: List[Tuple[List[int], List[int]]] = []
+    for plan in conv_plans:
+        input_ids: List[int] = []
+        labels: List[int] = []
+        for is_masked, is_static, static_ids, turn_idx in plan:
+            t_ids = static_ids if is_static else batch_encodings[turn_idx]
+            input_ids.extend(t_ids)
+            if is_masked:
+                labels.extend([ignore_index] * len(t_ids))
+            else:
+                labels.extend(t_ids)
+
+        if len(input_ids) > max_seq_len:
+            input_ids = input_ids[:max_seq_len]
+            labels = labels[:max_seq_len]
+
+        results.append((input_ids, labels))
+
+    return results
+
+
 class SFTDataset(Dataset[Dict[str, torch.Tensor]]):
     """
     PyTorch Dataset for Supervised Fine-Tuning with turn-level prompt masking.
+    Supports batched tokenization and formatting with granular progress verbosity.
     """
 
     def __init__(
@@ -366,39 +475,94 @@ class SFTDataset(Dataset[Dict[str, torch.Tensor]]):
         conversations: List[Any],
         tokenizer: PreTrainedTokenizerFast,
         max_seq_len: int = 2048,
+        batch_size: int = 2000,
     ) -> None:
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
         self.items: List[Dict[str, torch.Tensor]] = []
 
-        logger.info(f"Formatting {len(conversations)} SFT conversation samples with prompt masking...")
-        for raw in conversations:
-            try:
-                messages = normalize_conversation(raw)
-                input_ids, labels = format_messages_with_prompt_mask(
-                    messages=messages,
+        total_conversations = len(conversations)
+        logger.info(
+            f"Starting batched tokenization and formatting for {total_conversations:,} SFT conversation samples "
+            f"(chunk_size={batch_size}, max_seq_len={max_seq_len})..."
+        )
+
+        t_start = time.time()
+        total_active_tokens = 0
+        total_masked_tokens = 0
+        skipped_count = 0
+
+        for chunk_idx in range(0, total_conversations, batch_size):
+            chunk_t0 = time.time()
+            chunk_raw = conversations[chunk_idx : chunk_idx + batch_size]
+
+            valid_messages_list: List[List[Dict[str, str]]] = []
+            for raw in chunk_raw:
+                try:
+                    msgs = normalize_conversation(raw)
+                    if msgs:
+                        valid_messages_list.append(msgs)
+                    else:
+                        skipped_count += 1
+                except Exception as err:
+                    logger.debug(f"Skipping unparseable SFT conversation item: {err}")
+                    skipped_count += 1
+
+            if valid_messages_list:
+                encoded_pairs = batch_format_messages_with_prompt_mask(
+                    conversations=valid_messages_list,
                     tokenizer=tokenizer,
                     max_seq_len=max_seq_len,
-                    pad_to_max=False,
                 )
-                # Guard against items with 0 active assistant tokens (which would cause NaN loss)
-                if not any(label_val != -100 for label_val in labels):
-                    continue
 
-                input_ids_t = torch.tensor(input_ids, dtype=torch.long)
-                labels_t = torch.tensor(labels, dtype=torch.long)
-                attention_mask_t = torch.ones_like(input_ids_t)
+                for input_ids, labels in encoded_pairs:
+                    active_tokens = sum(1 for lbl in labels if lbl != -100)
+                    if active_tokens == 0:
+                        skipped_count += 1
+                        continue
 
-                self.items.append(
-                    {
-                        "input_ids": input_ids_t,
-                        "labels": labels_t,
-                        "attention_mask": attention_mask_t,
-                    }
-                )
-            except Exception as err:
-                logger.debug(f"Skipping unparseable SFT conversation item: {err}")
-                continue
+                    masked_tokens = len(labels) - active_tokens
+                    total_active_tokens += active_tokens
+                    total_masked_tokens += masked_tokens
+
+                    input_ids_t = torch.tensor(input_ids, dtype=torch.long)
+                    labels_t = torch.tensor(labels, dtype=torch.long)
+                    attention_mask_t = torch.ones_like(input_ids_t)
+
+                    self.items.append(
+                        {
+                            "input_ids": input_ids_t,
+                            "labels": labels_t,
+                            "attention_mask": attention_mask_t,
+                        }
+                    )
+
+            chunk_time = time.time() - chunk_t0
+            processed_so_far = min(chunk_idx + batch_size, total_conversations)
+            pct = (processed_so_far / total_conversations) * 100.0
+            elapsed_total = time.time() - t_start
+            throughput = processed_so_far / max(1e-4, elapsed_total)
+
+            logger.info(
+                f"Tokenization Progress: [{processed_so_far:,}/{total_conversations:,}] ({pct:5.1f}%) | "
+                f"Chunk Time: {chunk_time:.2f}s | Throughput: {throughput:,.1f} convs/s | "
+                f"Valid Indexed: {len(self.items):,} | Active Tokens: {total_active_tokens:,}"
+            )
+
+        total_time = time.time() - t_start
+        if len(self.items) == 0:
+            raise ValueError(
+                f"SFTDataset contains 0 valid conversational samples after processing and filtering "
+                f"{total_conversations} input items."
+            )
+
+        logger.info(
+            f"Tokenization & formatting completed in {total_time:.2f}s "
+            f"(Avg: {total_conversations / max(1e-4, total_time):,.1f} convs/s). "
+            f"Successfully indexed {len(self.items):,}/{total_conversations:,} valid conversational samples "
+            f"({total_active_tokens:,} active response tokens, {total_masked_tokens:,} prompt-masked tokens, "
+            f"{skipped_count:,} skipped)."
+        )
 
     def __len__(self) -> int:
         return len(self.items)
@@ -418,31 +582,23 @@ class SFTDataCollator:
         self.ignore_index = ignore_index
 
     def __call__(self, features: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+        batch_size = len(features)
         max_len = max(f["input_ids"].size(0) for f in features)
-        batch_input_ids = []
-        batch_labels = []
-        batch_attention_mask = []
 
-        for f in features:
+        batch_input_ids = torch.full((batch_size, max_len), self.pad_token_id, dtype=torch.long)
+        batch_labels = torch.full((batch_size, max_len), self.ignore_index, dtype=torch.long)
+        batch_attention_mask = torch.zeros((batch_size, max_len), dtype=torch.long)
+
+        for i, f in enumerate(features):
             seq_len = f["input_ids"].size(0)
-            pad_len = max_len - seq_len
-            if pad_len > 0:
-                pad_ids = torch.full((pad_len,), self.pad_token_id, dtype=torch.long)
-                pad_lbls = torch.full((pad_len,), self.ignore_index, dtype=torch.long)
-                pad_mask = torch.zeros((pad_len,), dtype=torch.long)
-
-                batch_input_ids.append(torch.cat([f["input_ids"], pad_ids], dim=0))
-                batch_labels.append(torch.cat([f["labels"], pad_lbls], dim=0))
-                batch_attention_mask.append(torch.cat([f["attention_mask"], pad_mask], dim=0))
-            else:
-                batch_input_ids.append(f["input_ids"])
-                batch_labels.append(f["labels"])
-                batch_attention_mask.append(f["attention_mask"])
+            batch_input_ids[i, :seq_len] = f["input_ids"]
+            batch_labels[i, :seq_len] = f["labels"]
+            batch_attention_mask[i, :seq_len] = f["attention_mask"]
 
         return {
-            "input_ids": torch.stack(batch_input_ids),
-            "labels": torch.stack(batch_labels),
-            "attention_mask": torch.stack(batch_attention_mask),
+            "input_ids": batch_input_ids,
+            "labels": batch_labels,
+            "attention_mask": batch_attention_mask,
         }
 
 

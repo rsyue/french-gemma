@@ -8,11 +8,11 @@ supporting optional embedding noise injection (NEFTune style).
 
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 import torch.nn as nn
-from transformers import AutoConfig, AutoModel
+from transformers import AutoConfig, AutoModel, PreTrainedTokenizerFast
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 logger = logging.getLogger(__name__)
@@ -50,17 +50,15 @@ class FrenchGemmaModel(nn.Module):
                 if hasattr(self.config, key):
                     setattr(self.config, key, val)
 
-        # Load the base model with blank config (no weights loaded)
         self.model: Any = AutoModel.from_config(self.config)  # type: ignore[no-untyped-call]
-
-        # Create LM head mapped to vocab size using PyTorch abstractions
         self.lm_head: Any = nn.Linear(self.config.hidden_size, vocab_size, bias=False)
 
-        # Tie word embeddings if configured
         if getattr(self.config, "tie_word_embeddings", True):
             self.lm_head.weight = self.model.embed_tokens.weight
 
-    def ensure_tokenizer_vocab_alignment(self, tokenizer: Any) -> None:
+    def ensure_tokenizer_vocab_alignment(
+        self, tokenizer: Union[int, PreTrainedTokenizerFast, Any]
+    ) -> None:
         """
         Ensures that the length of the tokenizer corresponds to the size of
         the final linear layer (self.lm_head) and embed_tokens.

@@ -154,6 +154,10 @@ def main() -> None:
         tokenizer=tokenizer,
         max_seq_len=config.max_sequence_length,
     )
+    if len(sft_dataset) == 0:
+        raise ValueError(
+            "SFTDataset contains 0 valid conversational samples after processing and filtering. Cannot train."
+        )
     logger.info(f"Tokenization complete: {len(sft_dataset)} active conversational samples indexed.")
 
     dataloader = get_sft_dataloader(
@@ -261,12 +265,6 @@ def main() -> None:
             for batch in dataloader:
                 if step >= config.max_steps:
                     break
-
-                if (step == 0 or step < 3) and config.gradient_accumulation_steps > 1:
-                    logger.info(
-                        f"[Step {step + 1}/{config.max_steps}] Processing micro-batch "
-                        f"{accum_batches + 1}/{config.gradient_accumulation_steps}..."
-                    )
 
                 prepared_batch = strategy.prepare_batch(batch, config.device)
                 with torch.amp.autocast(  # type: ignore[attr-defined]
