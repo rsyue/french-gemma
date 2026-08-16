@@ -6,78 +6,28 @@ and reference model log-probability scoring.
 """
 
 import dataclasses
-import json
 import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import torch
 
 from src.config import TrainingConfig
 from src.dataset import load_tokenizer_for_post_training
-from src.dpo_dataset import DPODataset, get_dpo_dataloader, normalize_dpo_pair
+from src.dpo_dataset import (
+    DPODataset,
+    get_dpo_dataloader,
+    load_dpo_pairs,
+    normalize_dpo_pair,
+)
 from src.model import FrenchGemmaModel
 from src.scheduler import get_cosine_warmup_scheduler
 from train.cli import parse_args_to_config
 from train.strategies.dpo import DPOStrategy
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_FRENCH_DPO_PAIRS: List[Dict[str, Any]] = [
-    {
-        "prompt": "Bonjour, comment t'appelles-tu ?",
-        "chosen": "Bonjour, je suis FrenchGemma, un LLM entraîné en français.",
-        "rejected": "Je ne sais pas.",
-    },
-    {
-        "prompt": "Peux-tu m'expliquer ce qu'est l'apprentissage automatique ?",
-        "chosen": (
-            "L'apprentissage automatique (machine learning) est une branche de l'intelligence artificielle "
-            "qui permet aux ordinateurs d'apprendre à partir de données pour accomplir des tâches sans être "
-            "explicitement programmés."
-        ),
-        "rejected": "C'est des maths sur ordinateur.",
-    },
-    {
-        "prompt": "Quelle est la capitale de la France ?",
-        "chosen": "La capitale de la France est Paris.",
-        "rejected": "C'est Lyon ou Marseille.",
-    },
-]
-
-
-def load_dpo_pairs(data_path: Optional[str] = None) -> List[Any]:
-    """Loads DPO preference pairs from JSON/JSONL file or returns default French preference pairs."""
-    if data_path is not None:
-        if not os.path.exists(data_path):
-            raise FileNotFoundError(f"DPO dataset file not found: {data_path}")
-        logger.info(f"Loading DPO preference data from {data_path}...")
-        pairs: List[Any] = []
-        if data_path.endswith(".jsonl"):
-            with open(data_path, "r", encoding="utf-8") as f:
-                for idx, line in enumerate(f, start=1):
-                    if line.strip():
-                        try:
-                            pairs.append(json.loads(line.strip()))
-                        except json.JSONDecodeError as err:
-                            raise ValueError(f"Malformed JSONL at {data_path}:{idx}: {err}") from err
-        else:
-            with open(data_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    pairs = data
-                elif isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
-                    pairs = data["data"]
-                else:
-                    raise ValueError(f"Expected list or dictionary with 'data' list in {data_path}")
-        if not pairs:
-            raise ValueError(f"No preference pairs loaded from {data_path}")
-        return pairs
-
-    logger.info("Using default French preference alignment dataset.")
-    return DEFAULT_FRENCH_DPO_PAIRS
 
 
 def initialize_dpo_models(
@@ -109,14 +59,19 @@ def initialize_dpo_models(
 
     policy_model.ensure_tokenizer_vocab_alignment(vocab_size)
 
-    ref_model_source = config.ref_model_id or config.model_id
     ref_model = FrenchGemmaModel(
-        model_id=ref_model_source,
+        model_id=config.model_id,
         vocab_size=vocab_size,
         embedding_noise_std=0.0,
     )
     if config.ref_model_id:
-        logger.info(f"Initialized distinct reference model from: {config.ref_model_id}")
+        logger.info(f"Loading distinct reference model weights from: {config.ref_model_id}")
+        if os.path.exists(config.ref_model_id):
+            ref_model.load_pretrained_checkpoint(config.ref_model_id)
+        else:
+            raise FileNotFoundError(
+                f"Specified ref_model_id checkpoint does not exist: {config.ref_model_id}"
+            )
     else:
         ref_model.load_state_dict(policy_model.state_dict())
 
@@ -296,7 +251,7 @@ def main() -> None:
                 accum_loss += loss.item()
                 accum_batches += 1
 
-                if accum_batches % config.gradient_accumulation_steps == 0 or (step + 1) >= config.max_steps:
+                if accum_batches % config.gradient_accumulation_steps == 0:
                     torch.nn.utils.clip_grad_norm_(policy_model.parameters(), max_norm=1.0)
                     optimizer.step()
                     scheduler.step()

@@ -10,11 +10,14 @@ import torch.nn as nn
 from src.dataset import train_custom_tokenizer
 from src.dpo_dataset import (
     DPODataset,
+    batch_format_dpo_pairs,
     format_dpo_pair,
     get_batch_logps,
     get_dpo_dataloader,
+    normalize_dpo_pair,
 )
 from train.builder import TrainingFactory
+from train.dpo import initialize_dpo_models
 from train.strategies.dpo import DPOStrategy
 
 
@@ -41,6 +44,7 @@ def test_format_dpo_pair(mock_tokenizer):
         rejected=rejected,
         tokenizer=mock_tokenizer,
         max_seq_len=64,
+        pad_to_max=True,
     )
 
     assert "chosen_input_ids" in pair
@@ -61,6 +65,44 @@ def test_format_dpo_pair(mock_tokenizer):
     # Unmasked labels should match input_ids
     assert pair["chosen_labels"][prompt_len] == pair["chosen_input_ids"][prompt_len]
     assert pair["rejected_labels"][prompt_len] == pair["rejected_input_ids"][prompt_len]
+
+
+def test_batch_format_dpo_pairs_parity(mock_tokenizer):
+    triplets = [
+        ("Bonjour", "Bonjour ! Comment puis-je vous aider ?", "Je ne sais pas."),
+        ("Quelle heure est-il ?", "Il est midi.", "Regarde ta montre."),
+    ]
+    batched = batch_format_dpo_pairs(triplets, mock_tokenizer, max_seq_len=64)
+    assert len(batched) == 2
+
+    for i, (p, c, r) in enumerate(triplets):
+        single = format_dpo_pair(p, c, r, mock_tokenizer, max_seq_len=64, pad_to_max=False)
+        assert batched[i]["chosen_input_ids"] == single["chosen_input_ids"]
+        assert batched[i]["chosen_labels"] == single["chosen_labels"]
+        assert batched[i]["rejected_input_ids"] == single["rejected_input_ids"]
+        assert batched[i]["rejected_labels"] == single["rejected_labels"]
+
+
+def test_normalize_dpo_pair_schemas():
+    # Standard dict format
+    item1 = {"prompt": "p", "chosen": "c", "rejected": "r"}
+    assert normalize_dpo_pair(item1) == ("p", "c", "r")
+
+    # Conversation list format
+    item2 = {
+        "prompt": [{"content": "user prompt"}],
+        "chosen": [{"content": "chosen response"}],
+        "rejected": [{"content": "rejected response"}],
+    }
+    assert normalize_dpo_pair(item2) == ("user prompt", "chosen response", "rejected response")
+
+    # Question / response_j / response_k format
+    item3 = {"question": "q", "response_j": "rj", "response_k": "rk"}
+    assert normalize_dpo_pair(item3) == ("q", "rj", "rk")
+
+    # Unsupported format
+    with pytest.raises(ValueError):
+        normalize_dpo_pair({"unknown": "val"})
 
 
 def test_dpo_dataset_and_dataloader(mock_tokenizer):
@@ -85,8 +127,12 @@ def test_dpo_dataset_and_dataloader(mock_tokenizer):
 
     assert "chosen_input_ids" in batch
     assert "rejected_input_ids" in batch
-    assert batch["chosen_input_ids"].shape == (2, 64)
-    assert batch["rejected_input_ids"].shape == (2, 64)
+    assert batch["chosen_input_ids"].shape[0] == 2
+    assert batch["rejected_input_ids"].shape[0] == 2
+    assert batch["chosen_attention_mask"].shape == batch["chosen_input_ids"].shape
+    assert batch["rejected_attention_mask"].shape == batch["rejected_input_ids"].shape
+    # Attention mask should be 1 on real tokens
+    assert (batch["chosen_attention_mask"] == 1).any()
 
 
 def test_get_batch_logps():
@@ -254,3 +300,25 @@ def test_dpo_checkpoint_rotation_logic(tmp_path):
     files = os.listdir(output_dir)
     assert not any("loss_1.5000" in f for f in files)
     assert any("loss_0.4000" in f for f in files)
+
+
+def test_initialize_dpo_models_ref_model_loading(tmp_path):
+    from src.config import TrainingConfig
+    from src.model import FrenchGemmaModel
+
+    # Save a mock pretrained reference checkpoint
+    mock_ref = FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=250)
+    ref_ckpt = str(tmp_path / "custom_ref.pt")
+    torch.save(mock_ref.state_dict(), ref_ckpt)
+
+    config = TrainingConfig(
+        model_id="google/gemma-3-270m-it",
+        ref_model_id=ref_ckpt,
+    )
+    policy_model, ref_model = initialize_dpo_models(config, vocab_size=250)
+
+    # Reference model should be frozen and in eval mode
+    assert not ref_model.training
+    for p in ref_model.parameters():
+        assert not p.requires_grad
+

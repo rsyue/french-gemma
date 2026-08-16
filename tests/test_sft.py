@@ -103,6 +103,37 @@ def test_format_messages_with_prompt_mask(mock_tokenizer):
         assert labels[k] == -100
 
 
+def test_batch_format_messages_with_prompt_mask_parity(mock_tokenizer):
+    from src.sft_dataset import batch_format_messages_with_prompt_mask
+
+    convs = [
+        [
+            {"role": "system", "content": "Système d'assistance."},
+            {"role": "user", "content": "Bonjour"},
+            {"role": "model", "content": "Bonjour !"},
+        ],
+        [
+            {"role": "user", "content": "Quelle est la capitale de la France ?"},
+            {"role": "model", "content": "Paris."},
+            {"role": "user", "content": "Merci !"},
+            {"role": "model", "content": "De rien !"},
+        ],
+    ]
+
+    batched = batch_format_messages_with_prompt_mask(convs, mock_tokenizer, max_seq_len=64)
+    assert len(batched) == 2
+
+    for i, msgs in enumerate(convs):
+        single_ids, single_labels = format_messages_with_prompt_mask(
+            messages=msgs,
+            tokenizer=mock_tokenizer,
+            max_seq_len=64,
+            pad_to_max=False,
+        )
+        assert batched[i][0] == single_ids
+        assert batched[i][1] == single_labels
+
+
 def test_sft_dataset_and_collator(mock_tokenizer):
     conversations = [
         [

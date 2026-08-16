@@ -1,11 +1,6 @@
-"""
-Direct Preference Optimization (DPO) Dataset, Collation, and Log-Probability Helpers.
-
-Formats (prompt, chosen, rejected) pairs using Gemma 3 turn markers and extracts
-sequence-level log-probabilities for preference alignment training.
-"""
-
+import json
 import logging
+import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -14,6 +9,60 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import PreTrainedTokenizerFast
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_FRENCH_DPO_PAIRS: List[Dict[str, Any]] = [
+    {
+        "prompt": "Bonjour, comment t'appelles-tu ?",
+        "chosen": "Bonjour, je suis FrenchGemma, un LLM entraîné en français.",
+        "rejected": "Je ne sais pas.",
+    },
+    {
+        "prompt": "Peux-tu m'expliquer ce qu'est l'apprentissage automatique ?",
+        "chosen": (
+            "L'apprentissage automatique (machine learning) est une branche de l'intelligence artificielle "
+            "qui permet aux ordinateurs d'apprendre à partir de données pour accomplir des tâches sans être "
+            "explicitement programmés."
+        ),
+        "rejected": "C'est des maths sur ordinateur.",
+    },
+    {
+        "prompt": "Quelle est la capitale de la France ?",
+        "chosen": "La capitale de la France est Paris.",
+        "rejected": "C'est Lyon ou Marseille.",
+    },
+]
+
+
+def load_dpo_pairs(data_path: Optional[str] = None) -> List[Any]:
+    """Loads DPO preference pairs from JSON/JSONL file or returns default French preference pairs."""
+    if data_path is not None:
+        if not os.path.exists(data_path):
+            raise FileNotFoundError(f"DPO dataset file not found: {data_path}")
+        logger.info(f"Loading DPO preference data from {data_path}...")
+        pairs: List[Any] = []
+        if data_path.endswith(".jsonl"):
+            with open(data_path, "r", encoding="utf-8") as f:
+                for idx, line in enumerate(f, start=1):
+                    if line.strip():
+                        try:
+                            pairs.append(json.loads(line.strip()))
+                        except json.JSONDecodeError as err:
+                            raise ValueError(f"Malformed JSONL at {data_path}:{idx}: {err}") from err
+        else:
+            with open(data_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    pairs = data
+                elif isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
+                    pairs = data["data"]
+                else:
+                    raise ValueError(f"Expected list or dictionary with 'data' list in {data_path}")
+        if not pairs:
+            raise ValueError(f"No preference pairs loaded from {data_path}")
+        return pairs
+
+    logger.info("Using default French preference alignment dataset.")
+    return DEFAULT_FRENCH_DPO_PAIRS
 
 
 def get_batch_logps(
@@ -59,11 +108,12 @@ def format_dpo_pair(
     tokenizer: PreTrainedTokenizerFast,
     max_seq_len: int = 2048,
     ignore_index: int = -100,
+    pad_to_max: bool = False,
 ) -> Dict[str, List[int]]:
     """
     Formats a single (prompt, chosen, rejected) triplet into tokenized inputs and prompt-masked labels.
     """
-    bos_token = "<bos>"
+    bos_token = tokenizer.bos_token or "<bos>"
     bos_ids = tokenizer.encode(bos_token, add_special_tokens=False) if bos_token else []
 
     prompt_turn = f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
@@ -93,17 +143,17 @@ def format_dpo_pair(
         rejected_ids = rejected_ids[:max_seq_len]
         rejected_labels = rejected_labels[:max_seq_len]
 
-    # Pad
-    pad_id = tokenizer.pad_token_id or 0
-    pad_chosen_len = max(0, max_seq_len - len(chosen_ids))
-    if pad_chosen_len > 0:
-        chosen_ids.extend([pad_id] * pad_chosen_len)
-        chosen_labels.extend([ignore_index] * pad_chosen_len)
+    if pad_to_max:
+        pad_id = tokenizer.pad_token_id or 0
+        pad_chosen_len = max(0, max_seq_len - len(chosen_ids))
+        if pad_chosen_len > 0:
+            chosen_ids.extend([pad_id] * pad_chosen_len)
+            chosen_labels.extend([ignore_index] * pad_chosen_len)
 
-    pad_rejected_len = max(0, max_seq_len - len(rejected_ids))
-    if pad_rejected_len > 0:
-        rejected_ids.extend([pad_id] * pad_rejected_len)
-        rejected_labels.extend([ignore_index] * pad_rejected_len)
+        pad_rejected_len = max(0, max_seq_len - len(rejected_ids))
+        if pad_rejected_len > 0:
+            rejected_ids.extend([pad_id] * pad_rejected_len)
+            rejected_labels.extend([ignore_index] * pad_rejected_len)
 
     return {
         "chosen_input_ids": chosen_ids,
@@ -137,12 +187,16 @@ def batch_format_dpo_pairs(
 ) -> List[Dict[str, List[int]]]:
     """
     Batched encoding and formatting for DPO preference pairs.
+    Returns unpadded token lists truncated to max_seq_len for dynamic batch collation.
     """
     if not pairs:
         return []
 
+    bos_token = tokenizer.bos_token or "<bos>"
+    bos_ids = tokenizer.encode(bos_token, add_special_tokens=False) if bos_token else []
+
     prompt_strs = [
-        f"<bos><start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
+        f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
         for prompt, _, _ in pairs
     ]
     chosen_strs = [f"{chosen}<end_of_turn>\n" for _, chosen, _ in pairs]
@@ -156,29 +210,23 @@ def batch_format_dpo_pairs(
     c_enc = all_enc[n : 2 * n]
     r_enc = all_enc[2 * n :]
 
-    pad_id = tokenizer.pad_token_id or 0
     results: List[Dict[str, List[int]]] = []
 
     for p_ids, c_ids, r_ids in zip(p_enc, c_enc, r_enc):
-        chosen_input = p_ids + c_ids
-        chosen_labels = [ignore_index] * len(p_ids) + c_ids
+        prefix_ids = bos_ids + p_ids
+        prefix_len = len(prefix_ids)
+
+        chosen_input = prefix_ids + c_ids
+        chosen_labels = [ignore_index] * prefix_len + c_ids
         if len(chosen_input) > max_seq_len:
             chosen_input = chosen_input[:max_seq_len]
             chosen_labels = chosen_labels[:max_seq_len]
-        else:
-            pad_len = max_seq_len - len(chosen_input)
-            chosen_input = chosen_input + [pad_id] * pad_len
-            chosen_labels = chosen_labels + [ignore_index] * pad_len
 
-        rej_input = p_ids + r_ids
-        rej_labels = [ignore_index] * len(p_ids) + r_ids
+        rej_input = prefix_ids + r_ids
+        rej_labels = [ignore_index] * prefix_len + r_ids
         if len(rej_input) > max_seq_len:
             rej_input = rej_input[:max_seq_len]
             rej_labels = rej_labels[:max_seq_len]
-        else:
-            pad_len = max_seq_len - len(rej_input)
-            rej_input = rej_input + [pad_id] * pad_len
-            rej_labels = rej_labels + [ignore_index] * pad_len
 
         results.append(
             {
@@ -216,7 +264,6 @@ class DPODataset(Dataset[Dict[str, torch.Tensor]]):
         )
 
         t_start = time.time()
-        pad_id = tokenizer.pad_token_id or 0
         skipped_count = 0
 
         for chunk_idx in range(0, total_pairs, batch_size):
@@ -242,20 +289,16 @@ class DPODataset(Dataset[Dict[str, torch.Tensor]]):
                 for item in formatted_batch:
                     chosen_ids_t = torch.tensor(item["chosen_input_ids"], dtype=torch.long)
                     chosen_labels_t = torch.tensor(item["chosen_labels"], dtype=torch.long)
-                    chosen_mask_t = (chosen_ids_t != pad_id).long()
 
                     rej_ids_t = torch.tensor(item["rejected_input_ids"], dtype=torch.long)
                     rej_labels_t = torch.tensor(item["rejected_labels"], dtype=torch.long)
-                    rej_mask_t = (rej_ids_t != pad_id).long()
 
                     self.items.append(
                         {
                             "chosen_input_ids": chosen_ids_t,
                             "chosen_labels": chosen_labels_t,
-                            "chosen_attention_mask": chosen_mask_t,
                             "rejected_input_ids": rej_ids_t,
                             "rejected_labels": rej_labels_t,
-                            "rejected_attention_mask": rej_mask_t,
                         }
                     )
 
@@ -292,16 +335,49 @@ class DPODataset(Dataset[Dict[str, torch.Tensor]]):
 
 
 class DPODataCollator:
-    """Collates individual DPO items into a batched dictionary."""
+    """
+    Dynamically collates individual unpadded DPO preference items into a batch tensor dictionary.
+    Pre-allocates 2D contiguous tensors and dynamically pads up to the maximum batch length.
+    """
+
+    def __init__(self, pad_token_id: int = 0, ignore_index: int = -100) -> None:
+        self.pad_token_id = pad_token_id
+        self.ignore_index = ignore_index
 
     def __call__(self, features: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+        if not features:
+            return {}
+
+        batch_size = len(features)
+        chosen_max_len = max(f["chosen_input_ids"].size(0) for f in features)
+        rejected_max_len = max(f["rejected_input_ids"].size(0) for f in features)
+
+        chosen_ids = torch.full((batch_size, chosen_max_len), self.pad_token_id, dtype=torch.long)
+        chosen_labels = torch.full((batch_size, chosen_max_len), self.ignore_index, dtype=torch.long)
+        chosen_mask = torch.zeros((batch_size, chosen_max_len), dtype=torch.long)
+
+        rej_ids = torch.full((batch_size, rejected_max_len), self.pad_token_id, dtype=torch.long)
+        rej_labels = torch.full((batch_size, rejected_max_len), self.ignore_index, dtype=torch.long)
+        rej_mask = torch.zeros((batch_size, rejected_max_len), dtype=torch.long)
+
+        for i, f in enumerate(features):
+            c_len = f["chosen_input_ids"].size(0)
+            chosen_ids[i, :c_len] = f["chosen_input_ids"]
+            chosen_labels[i, :c_len] = f["chosen_labels"]
+            chosen_mask[i, :c_len] = 1
+
+            r_len = f["rejected_input_ids"].size(0)
+            rej_ids[i, :r_len] = f["rejected_input_ids"]
+            rej_labels[i, :r_len] = f["rejected_labels"]
+            rej_mask[i, :r_len] = 1
+
         return {
-            "chosen_input_ids": torch.stack([f["chosen_input_ids"] for f in features]),
-            "chosen_labels": torch.stack([f["chosen_labels"] for f in features]),
-            "chosen_attention_mask": torch.stack([f["chosen_attention_mask"] for f in features]),
-            "rejected_input_ids": torch.stack([f["rejected_input_ids"] for f in features]),
-            "rejected_labels": torch.stack([f["rejected_labels"] for f in features]),
-            "rejected_attention_mask": torch.stack([f["rejected_attention_mask"] for f in features]),
+            "chosen_input_ids": chosen_ids,
+            "chosen_labels": chosen_labels,
+            "chosen_attention_mask": chosen_mask,
+            "rejected_input_ids": rej_ids,
+            "rejected_labels": rej_labels,
+            "rejected_attention_mask": rej_mask,
         }
 
 
@@ -314,8 +390,9 @@ def get_dpo_dataloader(
     sampler: Optional[torch.utils.data.Sampler[int]] = None,
     seed: Optional[int] = None,
 ) -> DataLoader[Any]:
-    """Constructs a PyTorch DataLoader for batched DPO training."""
-    collator = DPODataCollator()
+    """Constructs a PyTorch DataLoader for batched DPO training with dynamic collation."""
+    pad_id = dataset.tokenizer.pad_token_id or 0
+    collator = DPODataCollator(pad_token_id=pad_id)
     actual_shuffle = shuffle if sampler is None else False
     generator = torch.Generator().manual_seed(seed) if seed is not None else None
 

@@ -77,13 +77,17 @@ class FrenchGemmaModel(nn.Module):
             # Resize embed_tokens
             old_embed = self.model.embed_tokens.weight.data
             hidden_size = self.config.hidden_size
-            new_embed = nn.Embedding(target_vocab_size, hidden_size)
+            device = old_embed.device
+            dtype = old_embed.dtype
+            new_embed = nn.Embedding(target_vocab_size, hidden_size, device=device, dtype=dtype)
             n_copy = min(old_embed.shape[0], target_vocab_size)
             new_embed.weight.data[:n_copy] = old_embed[:n_copy]
             self.model.embed_tokens = new_embed
 
             # Recreate lm_head
-            self.lm_head = nn.Linear(hidden_size, target_vocab_size, bias=False)
+            self.lm_head = nn.Linear(
+                hidden_size, target_vocab_size, bias=False, device=device, dtype=dtype
+            )
             if getattr(self.config, "tie_word_embeddings", True):
                 self.lm_head.weight = self.model.embed_tokens.weight
 

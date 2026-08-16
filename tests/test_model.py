@@ -215,7 +215,23 @@ def test_load_hf_automodel_checkpoint_format(tmp_path):
 
     dst_model = FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=300)
     dst_model.load_pretrained_checkpoint(ckpt_file)
-
     for k in hf_automodel_state.keys():
         assert torch.allclose(dst_model.model.state_dict()[k], hf_automodel_state[k])
+
+
+def test_ensure_tokenizer_vocab_alignment_preserves_dtype():
+    model = FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=200)
+    model.to(dtype=torch.float16)
+
+    assert model.model.embed_tokens.weight.dtype == torch.float16
+    assert model.lm_head.weight.dtype == torch.float16
+
+    # Align with a larger vocab size
+    model.ensure_tokenizer_vocab_alignment(250)
+
+    assert model.config.vocab_size == 250
+    assert model.lm_head.out_features == 250
+    assert model.model.embed_tokens.weight.dtype == torch.float16
+    assert model.lm_head.weight.dtype == torch.float16
+
 

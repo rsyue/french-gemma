@@ -277,7 +277,7 @@ def main() -> None:
                 accum_loss += loss.item()
                 accum_batches += 1
 
-                if accum_batches % config.gradient_accumulation_steps == 0 or (step + 1) >= config.max_steps:
+                if accum_batches % config.gradient_accumulation_steps == 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     optimizer.step()
                     scheduler.step()
