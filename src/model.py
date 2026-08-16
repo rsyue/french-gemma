@@ -6,12 +6,16 @@ transformer and appends a PyTorch-native Linear language modeling head,
 supporting optional embedding noise injection (NEFTune style).
 """
 
+import logging
+import os
 from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
 from transformers import AutoConfig, AutoModel
 from transformers.modeling_outputs import CausalLMOutputWithPast
+
+logger = logging.getLogger(__name__)
 
 
 class FrenchGemmaModel(nn.Module):
@@ -53,6 +57,63 @@ class FrenchGemmaModel(nn.Module):
         # Tie word embeddings if configured
         if getattr(self.config, "tie_word_embeddings", True):
             self.lm_head.weight = self.model.embed_tokens.weight
+
+    def load_pretrained_checkpoint(self, checkpoint_path: str, strict: bool = False) -> None:
+        """
+        Loads weights from a local checkpoint directory or file into this model instance.
+        Supports directory format (containing pytorch_model.bin, model.safetensors, or .pt)
+        or direct checkpoint file paths.
+        """
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Pretrained checkpoint not found: {checkpoint_path}")
+
+        weights_file: Optional[str] = None
+        if os.path.isdir(checkpoint_path):
+            for candidate in ("pytorch_model.bin", "model.safetensors", "model.pt", "checkpoint.pt"):
+                cand_path = os.path.join(checkpoint_path, candidate)
+                if os.path.exists(cand_path):
+                    weights_file = cand_path
+                    break
+            if weights_file is None:
+                # Find any .bin or .pt file in the directory
+                for fname in os.listdir(checkpoint_path):
+                    if fname.endswith((".bin", ".pt", ".safetensors")):
+                        weights_file = os.path.join(checkpoint_path, fname)
+                        break
+            if weights_file is None:
+                raise FileNotFoundError(f"No weights file found inside directory: {checkpoint_path}")
+        else:
+            weights_file = checkpoint_path
+
+        logger.info(f"Loading pretrained model weights from: {weights_file}")
+        state_dict: Any
+        if weights_file.endswith(".safetensors"):
+            try:
+                from safetensors.torch import load_file
+                state_dict = load_file(weights_file, device="cpu")
+            except ImportError:
+                state_dict = torch.load(weights_file, map_location="cpu", weights_only=True)
+        else:
+            state_dict = torch.load(weights_file, map_location="cpu", weights_only=False)
+
+        if isinstance(state_dict, dict) and "model_state_dict" in state_dict:
+            state_dict = state_dict["model_state_dict"]
+
+        # Adapt keys if saved under different wrappers
+        cleaned_state_dict = {}
+        for k, v in state_dict.items():
+            clean_k = k
+            if clean_k.startswith("module."):
+                clean_k = clean_k[len("module.") :]
+            if clean_k.startswith("_orig_mod."):
+                clean_k = clean_k[len("_orig_mod.") :]
+            cleaned_state_dict[clean_k] = v
+
+        load_res = self.load_state_dict(cleaned_state_dict, strict=strict)
+        logger.info(
+            f"Loaded weights successfully. Missing keys: {len(load_res.missing_keys)}, "
+            f"Unexpected: {len(load_res.unexpected_keys)}"
+        )
 
     def get_input_embeddings(self) -> nn.Module:
         return self.model.embed_tokens  # type: ignore[no-any-return]

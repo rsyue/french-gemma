@@ -134,6 +134,7 @@ class TrainingConfig:
     dpo_label_smoothing: float = 0.0
     ref_model_id: Optional[str] = None
     save_dir: Optional[str] = None
+    pretrained_model_path: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.save_dir is not None:

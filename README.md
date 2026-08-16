@@ -181,8 +181,39 @@ source .venv/bin/activate && python -m train.pretrain --config configs/nvidia_co
 Run turn-based conversational fine-tuning on dialogues using the standard Gemma 3 turn format (`<start_of_turn>`, `<end_of_turn>`) with prompt loss masking:
 
 ```bash
-# Run SFT conversational training on macOS MPS or GPU
-source .venv/bin/activate && python -m train.sft --config configs/mlx_config.yaml --max-steps 1000 --learning-rate 2e-5
+# Run SFT continuing from a local pretrained model checkpoint
+source .venv/bin/activate && python -m train.sft --config configs/sft_config.yaml --pretrained-model-path ./checkpoints/pretrain/best_model --max-steps 1000 --learning-rate 2e-5
+```
+
+### Pretrained Checkpoint Continuation & Fallback Warning
+*   **Local Pretrained Checkpoint**: Pass `--pretrained-model-path <path>` (or set `pretrained_model_path` in your config) pointing to a local pretraining checkpoint directory or `.pt`/`.bin` file.
+*   **Base HuggingFace Fallback**: If no local checkpoint is provided, SFT logs a warning:
+    ```text
+    WARNING [train.sft] No local pretrained checkpoint provided via --pretrained-model-path. Defaulting to base Gemma 3 checkpoint from HuggingFace: 'google/gemma-3-270m-it'.
+    ```
+
+### Default SFT Dataset Mixture (`configs/sft_config.yaml`)
+By default, SFT trains on a curated mixture of high-quality French instruction and conversational datasets:
+```text
+├── Data Mix:
+│    ├── 40% OpenLLM-France/Luciole SFT + Claire-Dialogue (Conversational dynamics)
+│    ├── 30% ministere-culture (Organic user intents)
+│    └── 30% FQuAD (Task, reasoning & Q&A)
+```
+
+Configured in `configs/sft_config.yaml`:
+```yaml
+data_mix:
+  - dataset_path: "OpenLLM-France/Luciole-PostTraining-Dataset-1.1"
+    dataset_name: "sft_instruct"
+    percentage: 40.0
+    split: "croissant_aligned_instruct"
+  - dataset_path: "ministere-culture/comparia-votes"
+    percentage: 30.0
+    split: "train"
+  - dataset_path: "almanach/fquad"
+    percentage: 30.0
+    split: "train"
 ```
 
 ### Turn Format & Loss Masking

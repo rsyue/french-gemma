@@ -19,7 +19,7 @@ from src.config import TrainingConfig
 from src.dataset import train_custom_tokenizer
 from src.model import FrenchGemmaModel
 from src.scheduler import get_cosine_warmup_scheduler
-from src.sft_dataset import SFTDataset, get_sft_dataloader
+from src.sft_dataset import SFTDataset, get_sft_dataloader, load_sft_dataset_mix
 from train.builder import TrainingFactory
 from train.cli import parse_args_to_config
 
@@ -88,6 +88,33 @@ def load_sft_conversations(data_path: Optional[str]) -> List[Any]:
     return DEFAULT_FRENCH_CONVERSATIONS
 
 
+def initialize_sft_model(config: TrainingConfig, vocab_size: int) -> FrenchGemmaModel:
+    """
+    Initializes the French Gemma model for SFT.
+    If config.pretrained_model_path is set and exists, loads the local pretrained checkpoint.
+    Otherwise, logs a warning and defaults to the base Gemma 3 checkpoint from HuggingFace.
+    """
+    model = FrenchGemmaModel(
+        model_id=config.model_id,
+        vocab_size=vocab_size,
+        embedding_noise_std=config.embedding_noise_std,
+    )
+    if config.pretrained_model_path:
+        if os.path.exists(config.pretrained_model_path):
+            logger.info(f"Loading local pretrained checkpoint from: {config.pretrained_model_path}")
+            model.load_pretrained_checkpoint(config.pretrained_model_path)
+        else:
+            raise FileNotFoundError(
+                f"Specified pretrained_model_path does not exist: {config.pretrained_model_path}"
+            )
+    else:
+        logger.warning(
+            "No local pretrained checkpoint provided via --pretrained-model-path. "
+            f"Defaulting to base Gemma 3 checkpoint from HuggingFace: '{config.model_id}'."
+        )
+    return model
+
+
 def main() -> None:
     """Main CLI entrypoint for French Gemma 3 Supervised Fine-Tuning."""
     config: TrainingConfig = parse_args_to_config(modality="sft")
@@ -122,12 +149,25 @@ def main() -> None:
             save_dir=tokenizer_dir,
         )
 
-    sft_data_path = (
-        config.dataset_path
-        if config.dataset_path and config.dataset_path != "wikimedia/wikipedia"
-        else None
-    )
-    conversations = load_sft_conversations(sft_data_path)
+    if config.data_mix:
+        logger.info(f"Loading SFT conversation dataset mix ({len(config.data_mix)} entries)...")
+        conversations = load_sft_dataset_mix(
+            data_mix=config.data_mix,
+            total_examples=config.num_examples,
+            seed=config.seed,
+        )
+    else:
+        sft_data_path = (
+            config.dataset_path
+            if config.dataset_path and config.dataset_path != "wikimedia/wikipedia"
+            else None
+        )
+        conversations = load_sft_conversations(sft_data_path)
+
+    if not conversations:
+        logger.warning("No conversations loaded from data source. Falling back to default French dialogues.")
+        conversations = DEFAULT_FRENCH_CONVERSATIONS
+
     sft_dataset = SFTDataset(
         conversations=conversations,
         tokenizer=tokenizer,
@@ -144,11 +184,7 @@ def main() -> None:
     )
 
     logger.info("Initializing French Gemma model for SFT...")
-    model = FrenchGemmaModel(
-        model_id=config.model_id,
-        vocab_size=len(tokenizer),
-        embedding_noise_std=config.embedding_noise_std,
-    ).to(config.device)
+    model = initialize_sft_model(config=config, vocab_size=len(tokenizer)).to(config.device)
 
     strategy = TrainingFactory.build_strategy("sft")
     optimizer = torch.optim.AdamW(

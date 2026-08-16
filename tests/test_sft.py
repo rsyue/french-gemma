@@ -294,3 +294,157 @@ def test_sft_checkpoint_rotation_logic(tmp_path):
     files = os.listdir(output_dir)
     assert not any("loss_2.5000" in f for f in files)
     assert any("loss_1.2000" in f for f in files)
+
+
+def test_normalize_conversation_all_formats():
+    from src.sft_dataset import normalize_conversation
+
+    # 1. Luciole format (messages list)
+    luciole_item = {
+        "messages": [
+            {"role": "user", "content": "Quelle est la vitesse de la lumière ?"},
+            {"role": "assistant", "content": "Environ 300 000 km/s dans le vide."},
+        ]
+    }
+    norm1 = normalize_conversation(luciole_item)
+    assert len(norm1) == 2
+    assert norm1[0]["role"] == "user"
+    assert norm1[1]["content"] == "Environ 300 000 km/s dans le vide."
+
+    # 2. Comparia format (prompt + winner / responses)
+    comparia_item_a = {
+        "prompt": "Explique la photosynthèse.",
+        "response_a": "C'est la production d'énergie par les plantes via la lumière.",
+        "response_b": "Les plantes absorbent l'eau.",
+        "winner": "model_a",
+    }
+    norm2 = normalize_conversation(comparia_item_a)
+    assert len(norm2) == 2
+    assert norm2[0]["role"] == "user"
+    assert norm2[1]["content"] == "C'est la production d'énergie par les plantes via la lumière."
+
+    comparia_item_b = {
+        "prompt": "Qui a peint la Joconde ?",
+        "response_a": "Michel-Ange",
+        "response_b": "Léonard de Vinci",
+        "winner": "model_b",
+    }
+    norm2_b = normalize_conversation(comparia_item_b)
+    assert norm2_b[1]["content"] == "Léonard de Vinci"
+
+    # 3. FQuAD format (context + question + answers)
+    fquad_item = {
+        "context": "Paris est la capitale et la plus grande ville de France.",
+        "question": "Quelle est la capitale de la France ?",
+        "answers": {"text": ["Paris"], "answer_start": [0]},
+    }
+    norm3 = normalize_conversation(fquad_item)
+    assert len(norm3) == 2
+    assert "Contexte:\nParis est la capitale" in norm3[0]["content"]
+    assert "Question:\nQuelle est la capitale" in norm3[0]["content"]
+    assert norm3[1]["content"] == "Paris"
+
+
+def test_load_pretrained_checkpoint_in_model(tmp_path):
+    import os
+
+    from src.model import FrenchGemmaModel
+
+    model_id = "google/gemma-3-270m-it"
+    vocab_size = 256
+
+    model_src = FrenchGemmaModel(model_id=model_id, vocab_size=vocab_size)
+    ckpt_dir = str(tmp_path / "pretrained_ckpt")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    weights_path = os.path.join(ckpt_dir, "pytorch_model.bin")
+    torch.save(model_src.state_dict(), weights_path)
+
+    model_dst = FrenchGemmaModel(model_id=model_id, vocab_size=vocab_size)
+    model_dst.load_pretrained_checkpoint(ckpt_dir)
+
+    # Verify weights are identical
+    for p1, p2 in zip(model_src.parameters(), model_dst.parameters()):
+        assert torch.allclose(p1, p2)
+
+
+def test_sft_pretrained_checkpoint_warning_and_loading(tmp_path, caplog):
+    import logging
+    import os
+
+    from src.config import TrainingConfig
+    from src.model import FrenchGemmaModel
+    from train.sft import initialize_sft_model
+
+    # Case 1: No pretrained model path passed -> emits warning
+    config_default = TrainingConfig(model_id="google/gemma-3-270m-it", pretrained_model_path=None)
+    with caplog.at_level(logging.WARNING):
+        model1 = initialize_sft_model(config_default, vocab_size=256)
+    assert any("Defaulting to base Gemma 3 checkpoint from HuggingFace" in record.message for record in caplog.records)
+    assert isinstance(model1, FrenchGemmaModel)
+
+    # Case 2: Local pretrained model path passed -> loads checkpoint
+    ckpt_dir = str(tmp_path / "ckpt_pretrain")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    src_model = FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=256)
+    torch.save(src_model.state_dict(), os.path.join(ckpt_dir, "pytorch_model.bin"))
+
+    config_local = TrainingConfig(model_id="google/gemma-3-270m-it", pretrained_model_path=ckpt_dir)
+    model2 = initialize_sft_model(config_local, vocab_size=256)
+    assert isinstance(model2, FrenchGemmaModel)
+    for p1, p2 in zip(src_model.parameters(), model2.parameters()):
+        assert torch.allclose(p1, p2)
+
+
+def test_load_sft_dataset_mix_proportions():
+    from src.config import DatasetMixEntry
+    from src.sft_dataset import load_sft_dataset_mix
+
+    data_mix = [
+        DatasetMixEntry(
+            dataset_path="OpenLLM-France/Luciole-PostTraining-Dataset-1.1",
+            dataset_name="sft_instruct",
+            percentage=40.0,
+        ),
+        DatasetMixEntry(
+            dataset_path="ministere-culture/comparia-votes",
+            percentage=30.0,
+        ),
+        DatasetMixEntry(
+            dataset_path="almanach/fquad",
+            percentage=30.0,
+        ),
+    ]
+
+    fallback_samples = {
+        "OpenLLM-France/Luciole-PostTraining-Dataset-1.1": [
+            [
+                {"role": "user", "content": f"Luciole prompt {i}"},
+                {"role": "assistant", "content": f"Luciole resp {i}"},
+            ]
+            for i in range(100)
+        ],
+        "ministere-culture/comparia-votes": [
+            [
+                {"role": "user", "content": f"Comparia prompt {i}"},
+                {"role": "assistant", "content": f"Comparia resp {i}"},
+            ]
+            for i in range(100)
+        ],
+        "almanach/fquad": [
+            [
+                {"role": "user", "content": f"FQuAD prompt {i}"},
+                {"role": "assistant", "content": f"FQuAD resp {i}"},
+            ]
+            for i in range(100)
+        ],
+    }
+
+    mixed = load_sft_dataset_mix(data_mix, total_examples=100, fallback_conversations=fallback_samples, seed=42)
+    assert len(mixed) == 100
+    luciole_count = sum(1 for m in mixed if "Luciole" in m[0]["content"])
+    comparia_count = sum(1 for m in mixed if "Comparia" in m[0]["content"])
+    fquad_count = sum(1 for m in mixed if "FQuAD" in m[0]["content"])
+
+    assert luciole_count == 40
+    assert comparia_count == 30
+    assert fquad_count == 30

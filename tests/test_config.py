@@ -92,6 +92,15 @@ def test_specific_repo_configs():
     assert sft_cfg.max_sequence_length == 4096
     assert sft_cfg.save_dir == "./checkpoints/sft"
     assert sft_cfg.output_dir == "./checkpoints/sft"
+    assert sft_cfg.pretrained_model_path is None
+    assert sft_cfg.data_mix is not None
+    assert len(sft_cfg.data_mix) == 3
+    assert sft_cfg.data_mix[0].dataset_path == "OpenLLM-France/Luciole-PostTraining-Dataset-1.1"
+    assert sft_cfg.data_mix[0].percentage == 40.0
+    assert sft_cfg.data_mix[1].dataset_path == "ministere-culture/comparia-votes"
+    assert sft_cfg.data_mix[1].percentage == 30.0
+    assert sft_cfg.data_mix[2].dataset_path == "almanach/fquad"
+    assert sft_cfg.data_mix[2].percentage == 30.0
 
     dpo_cfg = TrainingConfig.from_yaml(os.path.join(config_dir, "dpo_config.yaml"))
     assert dpo_cfg.max_sequence_length == 4096
