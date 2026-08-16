@@ -5,12 +5,12 @@ Executes turn-based conversational fine-tuning with prompt masking
 using Gemma 3 turn tokens (<bos>, <eos>, <start_of_turn>, <end_of_turn>).
 """
 
-import json
+import dataclasses
 import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import torch
 from transformers import AutoTokenizer
@@ -19,73 +19,17 @@ from src.config import TrainingConfig
 from src.dataset import train_custom_tokenizer
 from src.model import FrenchGemmaModel
 from src.scheduler import get_cosine_warmup_scheduler
-from src.sft_dataset import SFTDataset, get_sft_dataloader, load_sft_dataset_mix
+from src.sft_dataset import (
+    DEFAULT_FRENCH_CONVERSATIONS,
+    SFTDataset,
+    get_sft_dataloader,
+    load_sft_conversations,
+    load_sft_dataset_mix,
+)
 from train.builder import TrainingFactory
 from train.cli import parse_args_to_config
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_FRENCH_CONVERSATIONS: List[List[Dict[str, str]]] = [
-    [
-        {"role": "user", "content": "Bonjour, comment t'appelles-tu ?"},
-        {
-            "role": "assistant",
-            "content": "Bonjour, je suis FrenchGemma, un LLM entraîné en français.",
-        },
-    ],
-    [
-        {
-            "role": "user",
-            "content": "Peux-tu m'expliquer ce qu'est l'apprentissage automatique ?",
-        },
-        {
-            "role": "assistant",
-            "content": (
-                "L'apprentissage automatique (machine learning) est une branche de l'intelligence artificielle "
-                "qui permet aux ordinateurs d'apprendre à partir de données sans programmation explicite."
-            ),
-        },
-    ],
-    [
-        {
-            "role": "user",
-            "content": "Quelle est la capitale de la France ?",
-        },
-        {"role": "assistant", "content": "La capitale de la France est Paris."},
-    ],
-]
-
-
-def load_sft_conversations(data_path: Optional[str]) -> List[Any]:
-    """Loads SFT conversations from JSON/JSONL file or returns default French dialogue corpus."""
-    if data_path is not None:
-        if not os.path.exists(data_path):
-            raise FileNotFoundError(f"SFT dataset file not found: {data_path}")
-        logger.info(f"Loading SFT conversation data from {data_path}...")
-        conversations: List[Any] = []
-        if data_path.endswith(".jsonl"):
-            with open(data_path, "r", encoding="utf-8") as f:
-                for idx, line in enumerate(f, start=1):
-                    if line.strip():
-                        try:
-                            conversations.append(json.loads(line.strip()))
-                        except json.JSONDecodeError as err:
-                            raise ValueError(f"Malformed JSONL at {data_path}:{idx}: {err}") from err
-        else:
-            with open(data_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    conversations = data
-                elif isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
-                    conversations = data["data"]
-                else:
-                    raise ValueError(f"Expected list or dictionary with 'data' list in {data_path}")
-        if not conversations:
-            raise ValueError(f"No conversation samples loaded from {data_path}")
-        return conversations
-
-    logger.info("Using default French conversational fine-tuning dataset.")
-    return DEFAULT_FRENCH_CONVERSATIONS
 
 
 def initialize_sft_model(config: TrainingConfig, vocab_size: int) -> FrenchGemmaModel:
@@ -195,6 +139,7 @@ def main() -> None:
     scheduler = get_cosine_warmup_scheduler(
         optimizer=optimizer,
         warmup_steps=config.warmup_steps,
+        warmup_ratio=config.warmup_ratio,
         total_steps=config.max_steps,
         eta_min_ratio=config.eta_min_ratio,
     )
@@ -229,16 +174,18 @@ def main() -> None:
                 should_save = True
 
         if should_save:
+            tmp_checkpoint_path = f"{checkpoint_path}.tmp"
             torch.save(
                 {
                     "step": step_idx,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "loss": current_loss,
-                    "config": config,
+                    "config": dataclasses.asdict(config),
                 },
-                checkpoint_path,
+                tmp_checkpoint_path,
             )
+            os.replace(tmp_checkpoint_path, checkpoint_path)
             best_checkpoints.append({"path": checkpoint_path, "loss": current_loss, "step": step_idx})
             logger.info(f"Saved new best SFT checkpoint (loss={current_loss:.4f}): {checkpoint_path}")
 

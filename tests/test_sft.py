@@ -448,3 +448,91 @@ def test_load_sft_dataset_mix_proportions():
     assert luciole_count == 40
     assert comparia_count == 30
     assert fquad_count == 30
+
+
+def test_sft_dataset_skips_malformed_and_empty_assistant(mock_tokenizer):
+    # Conversations containing 1 valid dialogue, 1 unparseable format, and 1 user-only dialogue
+    raw_data = [
+        {"role": "invalid_structure"},
+        [
+            {"role": "user", "content": "Question without response"},
+        ],
+        [
+            {"role": "user", "content": "Bonjour !"},
+            {"role": "assistant", "content": "Bonjour !"},
+        ],
+    ]
+    ds = SFTDataset(conversations=raw_data, tokenizer=mock_tokenizer, max_seq_len=128)
+    # Only the valid dialogue with assistant response should be retained
+    assert len(ds) == 1
+    item = ds[0]
+    assert any(label_val != -100 for label_val in item["labels"].tolist())
+
+
+def test_sft_dynamic_collator():
+    from src.sft_dataset import SFTDataCollator
+
+    collator = SFTDataCollator(pad_token_id=0, ignore_index=-100)
+    features = [
+        {
+            "input_ids": torch.tensor([1, 2, 3], dtype=torch.long),
+            "labels": torch.tensor([-100, 2, 3], dtype=torch.long),
+            "attention_mask": torch.tensor([1, 1, 1], dtype=torch.long),
+        },
+        {
+            "input_ids": torch.tensor([4, 5], dtype=torch.long),
+            "labels": torch.tensor([-100, 5], dtype=torch.long),
+            "attention_mask": torch.tensor([1, 1], dtype=torch.long),
+        },
+    ]
+    batch = collator(features)
+    assert batch["input_ids"].shape == (2, 3)
+    assert batch["labels"].shape == (2, 3)
+    assert batch["attention_mask"].shape == (2, 3)
+    # Second sample is padded by 1 token
+    assert batch["input_ids"][1, 2].item() == 0
+    assert batch["labels"][1, 2].item() == -100
+    assert batch["attention_mask"][1, 2].item() == 0
+
+
+def test_load_sft_dataset_mix_renormalizes_on_missing_dataset():
+    from src.config import DatasetMixEntry
+    from src.sft_dataset import load_sft_dataset_mix
+
+    data_mix = [
+        DatasetMixEntry(dataset_path="dataset_a", percentage=40.0),
+        DatasetMixEntry(dataset_path="dataset_b_gated", percentage=60.0),
+    ]
+
+    # Only dataset_a has samples (simulating dataset_b failing to load)
+    fallback_samples = {
+        "dataset_a": [
+            [{"role": "user", "content": f"A {i}"}, {"role": "assistant", "content": f"A resp {i}"}]
+            for i in range(50)
+        ],
+        "dataset_b_gated": [],
+    }
+
+    mixed = load_sft_dataset_mix(data_mix, total_examples=20, fallback_conversations=fallback_samples, seed=42)
+    # Should draw all 20 samples from dataset_a
+    assert len(mixed) == 20
+    assert all("A" in m[0]["content"] for m in mixed)
+
+
+def test_load_pretrained_checkpoint_errors(tmp_path):
+    import os
+
+    from src.model import FrenchGemmaModel
+
+    model = FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=256)
+
+    # Error on non-existent path
+    with pytest.raises(FileNotFoundError):
+        model.load_pretrained_checkpoint(str(tmp_path / "non_existent"))
+
+    # Error on empty directory
+    empty_dir = str(tmp_path / "empty_dir")
+    os.makedirs(empty_dir, exist_ok=True)
+    with pytest.raises(FileNotFoundError):
+        model.load_pretrained_checkpoint(empty_dir)
+

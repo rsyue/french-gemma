@@ -69,19 +69,21 @@ class FrenchGemmaModel(nn.Module):
 
         weights_file: Optional[str] = None
         if os.path.isdir(checkpoint_path):
-            for candidate in ("pytorch_model.bin", "model.safetensors", "model.pt", "checkpoint.pt"):
+            priority_candidates = ("pytorch_model.bin", "model.safetensors", "model.pt", "checkpoint.pt")
+            for candidate in priority_candidates:
                 cand_path = os.path.join(checkpoint_path, candidate)
                 if os.path.exists(cand_path):
                     weights_file = cand_path
                     break
             if weights_file is None:
-                # Find any .bin or .pt file in the directory
-                for fname in os.listdir(checkpoint_path):
-                    if fname.endswith((".bin", ".pt", ".safetensors")):
+                # Find any valid model weight file in directory, ignoring training state metadata
+                ignored_names = {"training_state.pt", "optimizer.pt", "scheduler.pt"}
+                for fname in sorted(os.listdir(checkpoint_path)):
+                    if fname.endswith((".bin", ".pt", ".safetensors")) and fname not in ignored_names:
                         weights_file = os.path.join(checkpoint_path, fname)
                         break
             if weights_file is None:
-                raise FileNotFoundError(f"No weights file found inside directory: {checkpoint_path}")
+                raise FileNotFoundError(f"No valid weights file found inside directory: {checkpoint_path}")
         else:
             weights_file = checkpoint_path
 
@@ -90,23 +92,33 @@ class FrenchGemmaModel(nn.Module):
         if weights_file.endswith(".safetensors"):
             try:
                 from safetensors.torch import load_file
+
                 state_dict = load_file(weights_file, device="cpu")
-            except ImportError:
-                state_dict = torch.load(weights_file, map_location="cpu", weights_only=True)
+            except ImportError as err:
+                raise ImportError(
+                    "The package 'safetensors' is required to load .safetensors checkpoints. "
+                    "Install it via 'uv pip install safetensors'."
+                ) from err
         else:
-            state_dict = torch.load(weights_file, map_location="cpu", weights_only=False)
+            state_dict = torch.load(weights_file, map_location="cpu", weights_only=True)
 
         if isinstance(state_dict, dict) and "model_state_dict" in state_dict:
             state_dict = state_dict["model_state_dict"]
 
-        # Adapt keys if saved under different wrappers
+        if not isinstance(state_dict, dict):
+            raise ValueError(
+                f"Invalid state dict loaded from {weights_file}: expected dictionary, got {type(state_dict)}"
+            )
+
+        # Adapt keys if saved under different wrappers (module., _orig_mod.)
         cleaned_state_dict = {}
         for k, v in state_dict.items():
             clean_k = k
-            if clean_k.startswith("module."):
-                clean_k = clean_k[len("module.") :]
-            if clean_k.startswith("_orig_mod."):
-                clean_k = clean_k[len("_orig_mod.") :]
+            while clean_k.startswith(("module.", "_orig_mod.")):
+                if clean_k.startswith("module."):
+                    clean_k = clean_k[len("module.") :]
+                elif clean_k.startswith("_orig_mod."):
+                    clean_k = clean_k[len("_orig_mod.") :]
             cleaned_state_dict[clean_k] = v
 
         load_res = self.load_state_dict(cleaned_state_dict, strict=strict)
@@ -157,15 +169,17 @@ class FrenchGemmaModel(nn.Module):
         # Compute logits via LM Head
         logits = self.lm_head(hidden_states)
 
-        loss = None
+        loss: Optional[torch.FloatTensor] = None
         if labels is not None:
             # Shift logits and labels for causal training: model predicts next token
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
 
-            # Loss function with cross entropy
-            loss_fct = nn.CrossEntropyLoss()
-            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            # Loss function with functional cross entropy
+            loss_t = torch.nn.functional.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1), ignore_index=-100
+            )
+            loss = loss_t.float()  # type: ignore[assignment]
 
         return CausalLMOutputWithPast(
             loss=loss, logits=logits, hidden_states=outputs.hidden_states, attentions=outputs.attentions

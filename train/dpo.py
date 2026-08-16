@@ -5,6 +5,7 @@ Aligns model responses with human preferences using implicit reward margins
 and reference model log-probability scoring.
 """
 
+import dataclasses
 import json
 import logging
 import os
@@ -201,6 +202,7 @@ def main() -> None:
                 should_save = True
 
         if should_save:
+            tmp_checkpoint_path = f"{checkpoint_path}.tmp"
             torch.save(
                 {
                     "step": step_idx,
@@ -208,10 +210,11 @@ def main() -> None:
                     "optimizer_state_dict": optimizer.state_dict(),
                     "loss": current_loss,
                     "metrics": strategy.latest_metrics,
-                    "config": config,
+                    "config": dataclasses.asdict(config),
                 },
-                checkpoint_path,
+                tmp_checkpoint_path,
             )
+            os.replace(tmp_checkpoint_path, checkpoint_path)
             best_checkpoints.append({"path": checkpoint_path, "loss": current_loss, "step": step_idx})
             logger.info(f"Saved new best DPO checkpoint (loss={current_loss:.4f}): {checkpoint_path}")
 
