@@ -246,7 +246,11 @@ source .venv/bin/activate && python -m train.dpo --config configs/dpo_config.yam
 
 ### DPO Loss & Reward Metrics
 DPO optimizes the policy $\pi_\theta$ against a frozen reference model $\pi_{\text{ref}}$:
-$$\mathcal{L}_{\text{DPO}}(\pi_\theta; \pi_{\text{ref}}) = -\mathbb{E}_{(x, y_w, y_l)}\left[\log \sigma\left(\beta \log \frac{\pi_\theta(y_w|x)}{\pi_{\text{ref}}(y_w|x)} - \beta \log \frac{\pi_\theta(y_l|x)}{\pi_{\text{ref}}(y_l|x)}\right)\right]$$
+
+```math
+\mathcal{L}_{\text{DPO}}(\pi_\theta; \pi_{\text{ref}}) = -\mathbb{E}_{(x, y_w, y_l)} \left[ \log \sigma \left( \beta \log \frac{\pi_\theta(y_w \mid x)}{\pi_{\text{ref}}(y_w \mid x)} - \beta \log \frac{\pi_\theta(y_l \mid x)}{\pi_{\text{ref}}(y_l \mid x)} \right) \right]
+```
+
 During training, the trainer monitors `reward_accuracy` and `reward_margin` metrics to track alignment progress.
 
 ---
