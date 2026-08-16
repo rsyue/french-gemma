@@ -78,7 +78,7 @@ def test_specific_repo_configs():
 
     amd_cfg = TrainingConfig.from_yaml(os.path.join(config_dir, "amd_config.yaml"))
     assert amd_cfg.vocab_size == 50000
-    assert amd_cfg.max_sequence_length == 8192
+    assert amd_cfg.max_sequence_length == 4096
     assert amd_cfg.batch_size == 8
     assert amd_cfg.gradient_accumulation_steps == 16
     assert amd_cfg.num_examples == 1000
