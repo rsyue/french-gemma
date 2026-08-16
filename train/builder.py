@@ -11,6 +11,7 @@ import torch.nn as nn
 from src.config import TrainingConfig
 from train.base import AbstractTrainingStrategy, BaseTrainer, StrategyType, TrainingStrategyProtocol
 from train.strategies.pretrain import PretrainStrategy
+from train.strategies.sft import SFTStrategy
 
 
 class ModularTrainer(BaseTrainer):
@@ -88,6 +89,8 @@ class TrainingFactory:
             strategy_lower = strategy.lower()
             if strategy_lower in ("pretrain", "pretraining", "causal"):
                 return PretrainStrategy()
+            if strategy_lower in ("sft", "supervised", "chat"):
+                return SFTStrategy()
             raise ValueError(f"Unknown training strategy string: '{strategy}'")
         raise TypeError(f"Invalid strategy type provided: {type(strategy)}")
 

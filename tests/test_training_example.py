@@ -14,7 +14,7 @@ import training_example  # type: ignore[import-not-found]
 
 
 def test_parse_and_load_config_defaults():
-    config = training_example.parse_and_load_config(["--config", "non_existent_config.yaml"])
+    config = training_example.parse_and_load_config([])
     assert config.model_id == "google/gemma-3-270m-it"
     assert config.learning_rate == 1.0e-4
     assert config.device == "cpu"
