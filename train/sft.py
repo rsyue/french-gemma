@@ -21,6 +21,7 @@ from src.scheduler import get_cosine_warmup_scheduler
 from src.sft_dataset import (
     DEFAULT_FRENCH_CONVERSATIONS,
     SFTDataset,
+    format_messages_with_prompt_mask,
     get_sft_dataloader,
     load_sft_conversations,
     load_sft_dataset_mix,
@@ -104,24 +105,45 @@ def main() -> None:
         logger.warning("No conversations loaded from data source. Falling back to default French dialogues.")
         conversations = DEFAULT_FRENCH_CONVERSATIONS
 
-    # Display an example of the applied chat template before tokenization for verification
+    # Display an actual sample conversation from the loaded dataset for verification
     if conversations:
         sample_conv = conversations[0]
+        logger.info("=" * 80)
+        logger.info("ACTUAL LOADED DATASET SAMPLE (Conversational Turns):")
+        logger.info("-" * 80)
+        for turn_idx, turn in enumerate(sample_conv, 1):
+            role_str = turn.get("role", "user").upper()
+            content_str = turn.get("content", "")
+            logger.info(f"  [Turn {turn_idx} - {role_str}]:")
+            for line in content_str.strip().splitlines():
+                logger.info(f"    {line}")
+        logger.info("-" * 80)
+        logger.info("APPLIED GEMMA 3 CHAT TEMPLATE (Pre-Tokenization Format):")
+        logger.info("-" * 80)
         try:
             rendered_sample = tokenizer.apply_chat_template(sample_conv, tokenize=False)
         except Exception:
-            rendered_sample = ""
+            rendered_sample = "<bos>"
             for m in sample_conv:
-                role = m.get("role", "user")
-                content = m.get("content", "")
-                rendered_sample += f"<start_of_turn>{role}\n{content}<end_of_turn>\n"
-
-        logger.info("=" * 70)
-        logger.info("Chat Template Sample Verification (before tokenization):")
-        logger.info("-" * 70)
+                role_val = "model" if m.get("role") in ("assistant", "model") else m.get("role", "user")
+                rendered_sample += f"<start_of_turn>{role_val}\n{m.get('content', '')}<end_of_turn>\n"
         for line in rendered_sample.strip().splitlines():
-            logger.info(f"  {line}")
-        logger.info("=" * 70)
+            logger.info(f"    {line}")
+
+        input_ids, labels = format_messages_with_prompt_mask(
+            messages=sample_conv,
+            tokenizer=tokenizer,
+            max_seq_len=config.max_sequence_length,
+            pad_to_max=False,
+        )
+        prompt_cnt = sum(1 for lbl in labels if lbl == -100)
+        resp_cnt = sum(1 for lbl in labels if lbl != -100)
+        logger.info("-" * 80)
+        logger.info(
+            f"Tokenization Check: {len(input_ids)} tokens total "
+            f"({prompt_cnt} prompt-masked tokens with loss=-100, {resp_cnt} active assistant tokens)"
+        )
+        logger.info("=" * 80)
 
     logger.info(
         f"Tokenizing and indexing {len(conversations)} SFT conversation samples "

@@ -215,6 +215,7 @@ def load_sft_dataset_mix(
             except Exception:
                 continue
 
+        logger.info(f"  -> Successfully extracted {len(normalized_items)} dialogues from {entry.dataset_path}")
         loaded_per_dataset.append(normalized_items)
 
     rng = random.Random(seed)
