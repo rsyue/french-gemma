@@ -8,6 +8,7 @@ dataclass field defaults, and custom freeze schedule formatting.
 import os
 import tempfile
 
+import pytest
 import yaml
 
 from src.config import TrainingConfig
@@ -109,5 +110,18 @@ def test_config_save_dir_synchronization():
     assert cfg2.save_dir == "./custom_out"
 
 
+def test_config_validation_guards():
+    with pytest.raises(ValueError, match="max_checkpoints"):
+        TrainingConfig(max_checkpoints=0)
 
+    with pytest.raises(ValueError, match="eval_interval"):
+        TrainingConfig(eval_interval=0)
 
+    with pytest.raises(ValueError, match="log_interval"):
+        TrainingConfig(log_interval=0)
+
+    with pytest.raises(ValueError, match="batch_size"):
+        TrainingConfig(batch_size=0)
+
+    with pytest.raises(ValueError, match="non-empty path"):
+        TrainingConfig(output_dir="")

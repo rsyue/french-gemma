@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -24,39 +25,38 @@ from train.cli import parse_args_to_config
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_FRENCH_CONVERSATIONS = [
+DEFAULT_FRENCH_CONVERSATIONS: List[List[Dict[str, str]]] = [
     [
         {"role": "user", "content": "Bonjour, comment t'appelles-tu ?"},
         {
             "role": "assistant",
-            "content": "Bonjour, je suis FrenchGemma, un LLM entraîné en français. Comment puis-je t'aider ?",
+            "content": "Bonjour, je suis FrenchGemma, un LLM entraîné en français.",
         },
     ],
     [
-        {"role": "user", "content": "Qu'est-ce que l'intelligence artificielle ?"},
+        {
+            "role": "user",
+            "content": "Peux-tu m'expliquer ce qu'est l'apprentissage automatique ?",
+        },
         {
             "role": "assistant",
             "content": (
-                "L'intelligence artificielle désigne des systèmes capables d'accomplir des tâches qui "
-                "demandent habituellement l'intelligence humaine, comme comprendre le langage et apprendre."
+                "L'apprentissage automatique (machine learning) est une branche de l'intelligence artificielle "
+                "qui permet aux ordinateurs d'apprendre à partir de données sans programmation explicite."
             ),
         },
     ],
     [
-        {"role": "user", "content": "Donne-moi une recette simple de crêpes."},
         {
-            "role": "assistant",
-            "content": (
-                "Pour des crêpes faciles : 250g de farine, 4 œufs, 500ml de lait, "
-                "un peu de sucre et une pincée de sel. "
-                "Mélange le tout et fais cuire dans une poêle bien chaude !"
-            ),
+            "role": "user",
+            "content": "Quelle est la capitale de la France ?",
         },
+        {"role": "assistant", "content": "La capitale de la France est Paris."},
     ],
 ]
 
 
-def load_sft_conversations(data_path: Optional[str] = None) -> List[Any]:
+def load_sft_conversations(data_path: Optional[str]) -> List[Any]:
     """Loads SFT conversations from JSON/JSONL file or returns default French dialogue corpus."""
     if data_path is not None:
         if not os.path.exists(data_path):
@@ -76,8 +76,10 @@ def load_sft_conversations(data_path: Optional[str] = None) -> List[Any]:
                 data = json.load(f)
                 if isinstance(data, list):
                     conversations = data
-                elif isinstance(data, dict) and "data" in data:
+                elif isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
                     conversations = data["data"]
+                else:
+                    raise ValueError(f"Expected list or dictionary with 'data' list in {data_path}")
         if not conversations:
             raise ValueError(f"No conversation samples loaded from {data_path}")
         return conversations
@@ -161,14 +163,25 @@ def main() -> None:
         eta_min_ratio=config.eta_min_ratio,
     )
 
+    device_type = "cuda" if "cuda" in str(config.device) else ("mps" if "mps" in str(config.device) else "cpu")
+    amp_dtype = (
+        torch.bfloat16
+        if config.amp_dtype == "bfloat16"
+        else (torch.float16 if config.amp_dtype == "float16" else torch.float32)
+    )
+
     model.train()
     step = 0
+    accum_loss = 0.0
+    accum_batches = 0
     t0 = time.time()
 
     os.makedirs(config.output_dir, exist_ok=True)
     best_checkpoints: List[Dict[str, Any]] = []
 
     def save_if_better(step_idx: int, current_loss: float) -> None:
+        if config.max_checkpoints <= 0:
+            return
         checkpoint_name = f"sft_checkpoint_step_{step_idx}_loss_{current_loss:.4f}.pt"
         checkpoint_path = os.path.join(config.output_dir, checkpoint_name)
         should_save = False
@@ -178,13 +191,6 @@ def main() -> None:
             worst = max(best_checkpoints, key=lambda x: x["loss"])
             if current_loss < worst["loss"]:
                 should_save = True
-                if os.path.exists(worst["path"]):
-                    try:
-                        os.remove(worst["path"])
-                        logger.info(f"Removed worst SFT checkpoint: {worst['path']}")
-                    except Exception as e:
-                        logger.warning(f"Failed to remove checkpoint {worst['path']}: {e}")
-                best_checkpoints.remove(worst)
 
         if should_save:
             torch.save(
@@ -200,37 +206,63 @@ def main() -> None:
             best_checkpoints.append({"path": checkpoint_path, "loss": current_loss, "step": step_idx})
             logger.info(f"Saved new best SFT checkpoint (loss={current_loss:.4f}): {checkpoint_path}")
 
+            if len(best_checkpoints) > config.max_checkpoints:
+                worst_to_delete = max(best_checkpoints, key=lambda x: x["loss"])
+                worst_path = worst_to_delete["path"]
+                out_resolved = Path(config.output_dir).resolve()
+                worst_resolved = Path(worst_path).resolve()
+                if worst_resolved.is_relative_to(out_resolved) and os.path.exists(worst_path):
+                    try:
+                        os.remove(worst_path)
+                        logger.info(
+                            f"Removed worst SFT checkpoint ({worst_to_delete['loss']:.4f}) to maintain "
+                            f"top {config.max_checkpoints}: {worst_path}"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to remove checkpoint {worst_path}: {e}")
+                best_checkpoints.remove(worst_to_delete)
+
     logger.info(f"Starting SFT optimization loop for {config.max_steps} steps...")
-    while step < config.max_steps:
-        for batch in dataloader:
-            if step >= config.max_steps:
-                break
+    try:
+        while step < config.max_steps:
+            for batch in dataloader:
+                if step >= config.max_steps:
+                    break
 
-            prepared_batch = strategy.prepare_batch(batch, config.device)
-            optimizer.zero_grad(set_to_none=True)
+                prepared_batch = strategy.prepare_batch(batch, config.device)
+                with torch.amp.autocast(  # type: ignore[attr-defined]
+                    device_type=device_type, dtype=amp_dtype, enabled=config.amp_enabled
+                ):
+                    loss = strategy.compute_loss(model, prepared_batch)
+                    loss_scaled = loss / config.gradient_accumulation_steps
 
-            loss = strategy.compute_loss(model, prepared_batch)
-            loss.backward()  # type: ignore[no-untyped-call]
+                loss_scaled.backward()  # type: ignore[no-untyped-call]
+                accum_loss += loss.item()
+                accum_batches += 1
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                if accum_batches % config.gradient_accumulation_steps == 0 or (step + 1) >= config.max_steps:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad(set_to_none=True)
+                    step += 1
+                    step_loss = accum_loss / max(1, accum_batches)
+                    accum_loss = 0.0
+                    accum_batches = 0
 
-            optimizer.step()
-            scheduler.step()
-            step += 1
+                    if step % config.log_interval == 0:
+                        current_lr = scheduler.get_last_lr()[0]
+                        elapsed = time.time() - t0
+                        logger.info(
+                            f"Step {step}/{config.max_steps} | Loss: {step_loss:.4f} | "
+                            f"LR: {current_lr:.2e} | Elapsed: {elapsed:.1f}s"
+                        )
 
-            if step % config.log_interval == 0:
-                current_lr = scheduler.get_last_lr()[0]
-                elapsed = time.time() - t0
-                logger.info(
-                    f"Step {step}/{config.max_steps} | Loss: {loss.item():.4f} | "
-                    f"LR: {current_lr:.2e} | Elapsed: {elapsed:.1f}s"
-                )
-
-            # Combined eval and save interval
-            if step % config.eval_interval == 0 or step == config.max_steps:
-                save_if_better(step, loss.item())
-
-    logger.info(f"SFT training completed. Top {len(best_checkpoints)} checkpoints retained in {config.output_dir}")
+                    # Combined eval and save interval
+                    if step % config.eval_interval == 0 or step == config.max_steps:
+                        save_if_better(step, step_loss)
+    finally:
+        logger.info(f"SFT training completed. Top {len(best_checkpoints)} checkpoints retained in {config.output_dir}")
 
 
 if __name__ == "__main__":

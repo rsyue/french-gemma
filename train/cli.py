@@ -7,6 +7,8 @@ import dataclasses
 import os
 from typing import Any, Dict, List, Optional, Union, get_args, get_origin
 
+import yaml
+
 from src.config import TrainingConfig, parse_data_mix_config
 
 
@@ -100,7 +102,6 @@ def parse_args_to_config(
 
     yaml_has_save_dir = False
     if parsed.config:
-        import yaml
         if os.path.exists(parsed.config):
             with open(parsed.config, "r", encoding="utf-8") as yaml_file:
                 raw_yaml = yaml.safe_load(yaml_file)

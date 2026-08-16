@@ -67,8 +67,8 @@ class DPOStrategy(AbstractTrainingStrategy):
 
         # Reference forward pass
         if self.ref_model is not None:
-            ref_params = list(self.ref_model.parameters())
-            if ref_params and ref_params[0].device != batch_input_ids.device:
+            first_param = next(self.ref_model.parameters(), None)
+            if first_param is not None and first_param.device != batch_input_ids.device:
                 self.ref_model.to(batch_input_ids.device)
 
             with torch.no_grad():

@@ -111,7 +111,7 @@ class TrainingConfig:
     amp_enabled: bool = True
     amp_dtype: str = "bfloat16"
     log_interval: int = 50
-    save_interval: int = 1000
+    save_interval: int = 500
     eval_interval: int = 500
     num_workers: int = 2
     prefetch_factor: int = 2
@@ -140,6 +140,17 @@ class TrainingConfig:
             self.output_dir = self.save_dir
         else:
             self.save_dir = self.output_dir
+
+        if not self.output_dir or not self.output_dir.strip():
+            raise ValueError("output_dir / save_dir must be a non-empty path string.")
+        if self.max_checkpoints < 1:
+            raise ValueError(f"max_checkpoints must be >= 1, got {self.max_checkpoints}")
+        if self.eval_interval < 1:
+            raise ValueError(f"eval_interval must be >= 1, got {self.eval_interval}")
+        if self.log_interval < 1:
+            raise ValueError(f"log_interval must be >= 1, got {self.log_interval}")
+        if self.batch_size < 1:
+            raise ValueError(f"batch_size must be >= 1, got {self.batch_size}")
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "TrainingConfig":

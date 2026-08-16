@@ -6,10 +6,13 @@ mixed-precision training, gradient accumulation, model evaluation, checkpoints
 management (perplexity and loss based), and TensorBoard metrics logging.
 """
 
+import json
 import logging
 import math
 import os
+import shutil
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -157,10 +160,8 @@ class Pretrainer:
         if self.is_main_process:
             self.writer = SummaryWriter(log_dir=tb_log_dir)
             os.makedirs(self.output_dir, exist_ok=True)
-        # Top perplexity and training loss checkpoints
-        self.best_ppl_checkpoints: List[Dict[str, Any]] = []
-        self.best_checkpoints = self.best_ppl_checkpoints
-        self.best_loss_checkpoints: List[Dict[str, Any]] = []
+        # Top best checkpoints based on evaluation metrics
+        self.best_checkpoints: List[Dict[str, Any]] = []
         self.latest_train_loss: float = float("inf")
         self.total_train_loss: float = 0.0
         self.total_train_steps: int = 0
@@ -328,7 +329,12 @@ class Pretrainer:
                         if self.is_main_process:
                             logger.info(f"Eval progress: batch {batch_idx + 1}/{total_val_batches}")
 
-        avg_loss = total_loss / max(1, total_batches)
+        if total_batches == 0:
+            if self.is_main_process:
+                logger.warning("No validation batches processed; skipping evaluation.")
+            return float("inf")
+
+        avg_loss = total_loss / total_batches
 
         # Average validation loss across all ranks in DDP environment
         if torch.distributed.is_available() and torch.distributed.is_initialized():
@@ -340,31 +346,25 @@ class Pretrainer:
         t_eval = time.time() - t_eval_start
 
         step_str = self.format_step(global_step)
-        msg = (
-            f"--- Eval Step {step_str} | Loss: {avg_loss:.4f} | "
-            f"Perplexity: {perplexity:.4f} | Time: {t_eval:.2f}s ---"
-        )
         if self.is_main_process:
-            logger.info(msg)
-
-        # Test generation
-        sample_prompt = "Le français est"
-        generated = generate_text(
-            self.model,
-            self.tokenizer,
-            sample_prompt,
-            max_new_tokens=20,
-            device=self.device,
-            repetition_penalty=self.repetition_penalty,
-        )
-        if self.is_main_process:
+            logger.info(
+                f"--- Eval Step {step_str} | Loss: {avg_loss:.4f} | "
+                f"Perplexity: {perplexity:.4f} | Time: {t_eval:.2f}s ---"
+            )
+            sample_prompt = "Le français est"
+            generated = generate_text(
+                self.model,
+                self.tokenizer,
+                sample_prompt,
+                max_new_tokens=20,
+                device=self.device,
+                repetition_penalty=self.repetition_penalty,
+            )
             logger.info(f"Sample generation: '{generated}'")
-
-        # Log to tensorboard
-        if self.is_main_process and self.writer is not None:
-            self.writer.add_scalar("Loss/val", avg_loss, global_step)
-            self.writer.add_scalar("Perplexity/val", perplexity, global_step)
-            self.writer.add_text("Generation/val", generated, global_step)
+            if self.writer is not None:
+                self.writer.add_scalar("Loss/val", avg_loss, global_step)
+                self.writer.add_scalar("Perplexity/val", perplexity, global_step)
+                self.writer.add_text("Generation/val", generated, global_step)
 
         # Manage best checkpoints on evaluation: save if qualifying for top max_checkpoints (default 5)
         self.save_best_checkpoint(
@@ -388,16 +388,16 @@ class Pretrainer:
 
         # Extract raw model (unwrap compile and DDP)
         raw_model: Any = self.model
-        if hasattr(raw_model, "_orig_mod"):
-            raw_model = raw_model._orig_mod
-        if isinstance(raw_model, nn.parallel.DistributedDataParallel):
-            raw_model = raw_model.module
+        while hasattr(raw_model, "_orig_mod") or isinstance(raw_model, nn.parallel.DistributedDataParallel):
+            if hasattr(raw_model, "_orig_mod"):
+                raw_model = raw_model._orig_mod
+            elif isinstance(raw_model, nn.parallel.DistributedDataParallel):
+                raw_model = raw_model.module
 
         # Ensure the raw model config architectures is set to Gemma3ForCausalLM
         if hasattr(raw_model, "config") and raw_model.config is not None:
             raw_model.config.architectures = ["Gemma3ForCausalLM"]
-            
-            # Adjust layer_types to avoid validation failure in mock models
+
             num_layers = getattr(raw_model.config, "num_hidden_layers", None)
             layer_types = getattr(raw_model.config, "layer_types", None)
             if num_layers is not None and layer_types is not None and len(layer_types) != num_layers:
@@ -406,27 +406,23 @@ class Pretrainer:
                 else:
                     default_type = layer_types[-1] if layer_types else "full_attention"
                     raw_model.config.layer_types = list(layer_types) + [default_type] * (num_layers - len(layer_types))
-            
+
             try:
                 raw_model.config.save_pretrained(checkpoint_path)
             except Exception as e:
                 logger.warning(f"Failed to save Hugging Face config: {e}")
                 try:
-                    import json
-                    with open(os.path.join(checkpoint_path, "config.json"), "w") as f:
+                    with open(os.path.join(checkpoint_path, "config.json"), "w", encoding="utf-8") as f:
                         json.dump(raw_model.config.to_dict(), f, indent=2)
                 except Exception as e2:
                     logger.warning(f"Failed to save fallback config.json: {e2}")
 
-        # Save weights
         weights_path = os.path.join(checkpoint_path, "pytorch_model.bin")
         torch.save(raw_model.state_dict(), weights_path)
 
-        # Save tokenizer if available
         if self.tokenizer is not None and hasattr(self.tokenizer, "save_pretrained"):
             self.tokenizer.save_pretrained(checkpoint_path)
 
-        # Save training state (optimizer, scheduler, metrics)
         training_state = {
             "global_step": global_step,
             "optimizer_state_dict": self.optimizer.state_dict(),
@@ -448,9 +444,14 @@ class Pretrainer:
         """
         Saves a checkpoint and retains only the top max_checkpoints (default 5) best checkpoints.
         If max_checkpoints is reached and the new metric is better than the worst of the top 5,
-        the worst checkpoint is deleted from disk to make room for the new one.
+        the new checkpoint is written first, and the worst checkpoint is then safely removed.
         """
         if not self.is_main_process:
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                torch.distributed.barrier()
+            return False
+
+        if self.max_checkpoints <= 0:
             return False
 
         checkpoint_name = (
@@ -467,38 +468,44 @@ class Pretrainer:
             worst = max(self.best_checkpoints, key=lambda x: x["metric"])
             if metric < worst["metric"]:
                 should_save = True
-                worst_path = worst["path"]
-                if os.path.exists(worst_path):
-                    try:
-                        import shutil
-
-                        if os.path.isdir(worst_path):
-                            shutil.rmtree(worst_path)
-                        else:
-                            os.remove(worst_path)
-                        logger.info(f"Removed worst checkpoint ({worst['metric']:.4f}) to make room: {worst_path}")
-                    except Exception as e:
-                        logger.warning(f"Failed to delete worst checkpoint {worst_path}: {e}")
-                self.best_checkpoints.remove(worst)
 
         if should_save:
             payload = metrics_dict if metrics_dict is not None else {metric_name: metric}
             self.save_checkpoint_dir(checkpoint_path, global_step, payload)
             self.best_checkpoints.append({"path": checkpoint_path, "metric": metric, "step": global_step})
             logger.info(f"Saved new best checkpoint ({metric_name}={metric:.4f}): {checkpoint_path}")
+
+            # Evict worst checkpoint after confirming write success
+            if len(self.best_checkpoints) > self.max_checkpoints:
+                worst_to_delete = max(self.best_checkpoints, key=lambda x: x["metric"])
+                worst_path = worst_to_delete["path"]
+                out_resolved = Path(self.output_dir).resolve()
+                worst_resolved = Path(worst_path).resolve()
+                if worst_resolved.is_relative_to(out_resolved) and os.path.exists(worst_path):
+                    try:
+                        if os.path.isdir(worst_path):
+                            shutil.rmtree(worst_path)
+                        else:
+                            os.remove(worst_path)
+                        logger.info(
+                            f"Removed worst checkpoint ({worst_to_delete['metric']:.4f}) to maintain "
+                            f"top {self.max_checkpoints}: {worst_path}"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to delete worst checkpoint {worst_path}: {e}")
+                self.best_checkpoints.remove(worst_to_delete)
+
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                torch.distributed.barrier()
             return True
         else:
             logger.info(
                 f"No improvement in {metric_name} (current: {metric:.4f}). "
                 f"Leaving top {len(self.best_checkpoints)} checkpoints in place."
             )
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                torch.distributed.barrier()
             return False
-
-    def save_best_perplexity_checkpoint(self, global_step: int, perplexity: float) -> None:
-        self.save_best_checkpoint(global_step, perplexity, metric_name="ppl")
-
-    def save_best_loss_checkpoint(self, global_step: int, train_loss: float) -> None:
-        self.save_best_checkpoint(global_step, train_loss, metric_name="loss")
 
     def save_checkpoint(self, global_step: int, perplexity: float = float("inf")) -> None:
         """
