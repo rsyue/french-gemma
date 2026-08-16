@@ -23,12 +23,13 @@ Welcome, agent! This document contains critical guidelines, architecture pattern
 ---
 
 ## 2. Core Repository Architecture
-*   **`src/config.py`**: Custom config loader/validator from YAML (`TrainingConfig`), including distributed parameters like `dist_timeout_seconds`.
-*   **`src/dataset.py`**: Custom tokenizer training (`ByteLevelBPETokenizer`), flat token packing with a sliding window stride of 50 tokens, atomic cache generation with `.ready` sentinels, rank synchronization helpers (`is_data_prepared`, `wait_for_data_prep`), and `DataLoader` creation. Uses **right padding** (`padding_side = "right"`) for causal decoder training. Supports optional pre-computed chunk injection and custom samplers (e.g. `DistributedSampler`).
+*   **`src/config.py`**: Custom config loader/validator from YAML (`TrainingConfig`), including multi-dataset mixes (`DatasetMixEntry`, `parse_data_mix_config`) and distributed parameters like `dist_timeout_seconds`.
+*   **`src/dataset.py`**: Custom tokenizer training (`ByteLevelBPETokenizer`), multi-dataset proportional loading and mixing (`load_dataset_mix`), flat token packing with a sliding window stride of 50 tokens, atomic cache generation with `.ready` sentinels, rank synchronization helpers (`is_data_prepared`, `wait_for_data_prep`), and `DataLoader` creation. Uses **right padding** (`padding_side = "right"`) for causal decoder training. Supports optional pre-computed chunk injection and custom samplers (e.g. `DistributedSampler`).
 *   **`src/model.py`**: Wraps the base `Gemma3` model initialized from a blank configuration, adding a PyTorch-native `nn.Linear` LM Head. Incorporates **Gaussian embedding noise** (regulated by `embedding_noise_std`) during training.
 *   **`src/scheduler.py`**: Handles linear warmup + cosine annealing with warm restarts, and `FreezeManager` layer freezing schedules.
 *   **`src/trainer.py`**: Pretraining trainer loop driving optimization, evaluation metrics (loss & perplexity), text generation, and TensorBoard logging. Retains the **top 3 best checkpoints** based on perplexity and training loss. Implements process-rank checks (`self.is_main_process`) and validation loss all-reduce for DDP synchronization.
 *   **`train/pretrain.py` & `scripts/run_ddp.sh`**: Configurable, distributed-ready pretraining launcher and strategy supporting single-GPU/MPS runs and multi-GPU DDP training. Defers `dist.init_process_group` until after rank-0 data preparation using sentinel synchronization to avoid NCCL watchdog timeouts.
+*   **`inference.py`**: Interactive CLI chat interface and text streamer supporting configurable sampling parameters (`do_sample`, `temperature`, `top_p`, `top_k`, `repetition_penalty`).
 
 ---
 

@@ -18,6 +18,7 @@ from src.dataset import (
     PackedTextDataset,
     get_dataloader,
     is_data_prepared,
+    load_dataset_mix,
     load_french_dataset,
     prepare_and_pack_data,
     train_custom_tokenizer,
@@ -26,7 +27,6 @@ from src.dataset import (
 from src.model import FrenchGemmaModel
 from src.scheduler import FreezeManager, get_cosine_warmup_scheduler
 from src.trainer import Pretrainer
-from train.builder import TrainingFactory
 from train.cli import parse_args_to_config
 
 logger = logging.getLogger(__name__)
@@ -61,29 +61,37 @@ def main() -> None:
         f"Pretraining launched. Model: {config.model_id} | Device: {device} | Distributed: {is_distributed}"
     )
 
-    strategy = TrainingFactory.build_strategy("pretrain")
-    logger.info(f"Loaded strategy: {type(strategy).__name__}")
-
     tokenizer_dir = os.path.join(config.data_cache_dir, "tokenizer_checkpoint")
     cache_path = os.path.join(config.data_cache_dir, "packed_dataset_cache.bin")
 
     if rank == 0:
         os.makedirs(config.data_cache_dir, exist_ok=True)
         if not is_data_prepared(cache_path, tokenizer_dir):
-            num_ex_str = str(config.num_examples).strip().lower()
-            if num_ex_str in ("all", "full", "none", "0"):
-                dataset_split = "train"
-            elif num_ex_str.isdigit():
-                dataset_split = f"train[:{num_ex_str}]"
+            if config.data_mix:
+                logger.info(
+                    f"Loading French dataset mix with {len(config.data_mix)} sources "
+                    f"(total_examples={config.num_examples})..."
+                )
+                texts = load_dataset_mix(
+                    data_mix=config.data_mix,
+                    total_examples=config.num_examples,
+                    seed=config.seed,
+                )
             else:
-                dataset_split = str(config.num_examples)
+                num_ex_str = str(config.num_examples).strip().lower()
+                if num_ex_str in ("all", "full", "none", "0"):
+                    dataset_split = "train"
+                elif num_ex_str.isdigit():
+                    dataset_split = f"train[:{num_ex_str}]"
+                else:
+                    dataset_split = str(config.num_examples)
 
-            logger.info(f"Loading French dataset split: '{dataset_split}'...")
-            texts = load_french_dataset(
-                dataset_path=config.dataset_path,
-                dataset_name=config.dataset_name,
-                split=dataset_split,
-            )
+                logger.info(f"Loading French dataset split: '{dataset_split}'...")
+                texts = load_french_dataset(
+                    dataset_path=config.dataset_path,
+                    dataset_name=config.dataset_name,
+                    split=dataset_split,
+                )
             vocab_size = config.vocab_size or 35000
             logger.info(f"Training custom tokenizer with vocab_size={vocab_size}...")
             tokenizer = train_custom_tokenizer(texts, vocab_size=vocab_size, save_dir=tokenizer_dir)

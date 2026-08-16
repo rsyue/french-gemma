@@ -18,6 +18,7 @@ from src.dataset import (
     PackedTextDataset,
     get_dataloader,
     is_data_prepared,
+    load_dataset_mix,
     load_french_dataset,
     prepare_and_pack_data,
     train_custom_tokenizer,
@@ -74,19 +75,30 @@ def main() -> None:
         logger.info("Main process (Rank 0) starting data preparation...")
         os.makedirs(config.data_cache_dir, exist_ok=True)
         if not is_data_prepared(cache_path, tokenizer_dir):
-            num_ex_str = str(config.num_examples).strip().lower()
-            if num_ex_str in ("all", "full", "none", "0"):
-                dataset_split = "train"
-            elif num_ex_str.isdigit():
-                dataset_split = f"train[:{num_ex_str}]"
+            if config.data_mix:
+                logger.info(
+                    f"Loading French dataset mix with {len(config.data_mix)} sources "
+                    f"(total_examples={config.num_examples})..."
+                )
+                texts = load_dataset_mix(
+                    data_mix=config.data_mix,
+                    total_examples=config.num_examples,
+                    seed=config.seed,
+                )
             else:
-                dataset_split = str(config.num_examples)
+                num_ex_str = str(config.num_examples).strip().lower()
+                if num_ex_str in ("all", "full", "none", "0"):
+                    dataset_split = "train"
+                elif num_ex_str.isdigit():
+                    dataset_split = f"train[:{num_ex_str}]"
+                else:
+                    dataset_split = str(config.num_examples)
 
-            texts = load_french_dataset(
-                dataset_path=config.dataset_path,
-                dataset_name=config.dataset_name,
-                split=dataset_split,
-            )
+                texts = load_french_dataset(
+                    dataset_path=config.dataset_path,
+                    dataset_name=config.dataset_name,
+                    split=dataset_split,
+                )
             vocab_size = config.vocab_size or 35000
             tokenizer = train_custom_tokenizer(texts, vocab_size=vocab_size, save_dir=tokenizer_dir)
             prepare_and_pack_data(
@@ -123,7 +135,7 @@ def main() -> None:
     val_sampler: Optional[DistributedSampler[int]] = None
     if is_distributed:
         train_sampler = DistributedSampler(
-            dataset, num_replicas=world_size, rank=rank, shuffle=True, seed=42
+            dataset, num_replicas=world_size, rank=rank, shuffle=True, seed=config.seed
         )
         val_sampler = DistributedSampler(
             dataset, num_replicas=world_size, rank=rank, shuffle=False
@@ -137,6 +149,7 @@ def main() -> None:
         pin_memory=config.pin_memory,
         shuffle=(train_sampler is None),
         sampler=train_sampler,
+        seed=config.seed,
     )
     val_dataloader = get_dataloader(
         dataset=dataset,
@@ -146,6 +159,7 @@ def main() -> None:
         pin_memory=config.pin_memory,
         shuffle=False,
         sampler=val_sampler,
+        seed=config.seed,
     )
 
     model: torch.nn.Module = FrenchGemmaModel(

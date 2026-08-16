@@ -4,10 +4,9 @@ Dynamic CLI argument parser and TrainingConfig plumbing for train package.
 
 import argparse
 import dataclasses
-import os
 from typing import Any, Dict, List, Optional, Union, get_args, get_origin
 
-from src.config import TrainingConfig
+from src.config import TrainingConfig, parse_data_mix_config
 
 
 def str_to_bool(val: Any) -> bool:
@@ -63,15 +62,19 @@ def parse_args_to_config(args_list: Optional[List[str]] = None) -> TrainingConfi
         dash_name = f"--{f.name.replace('_', '-')}"
         underscore_name = f"--{f.name}"
 
-        field_type = f.type
-        origin = get_origin(field_type)
-        if origin is Union:
-            args_of_union = get_args(field_type)
-            non_none_types = [t for t in args_of_union if t is not type(None)]
-            if str in non_none_types and int in non_none_types:
-                field_type = str_or_int
-            elif non_none_types:
-                field_type = non_none_types[0]
+        field_type: Any
+        if f.name == "data_mix":
+            field_type = str
+        else:
+            field_type = f.type
+            origin = get_origin(field_type)
+            if origin is Union:
+                args_of_union = get_args(field_type)
+                non_none_types = [t for t in args_of_union if t is not type(None)]
+                if str in non_none_types and int in non_none_types:
+                    field_type = str_or_int
+                elif non_none_types:
+                    field_type = non_none_types[0]
 
         kwargs: Dict[str, Any] = {
             "type": field_type,
@@ -90,7 +93,7 @@ def parse_args_to_config(args_list: Optional[List[str]] = None) -> TrainingConfi
 
     parsed = parser.parse_args(args_list)
 
-    if parsed.config and os.path.exists(parsed.config):
+    if parsed.config:
         config = TrainingConfig.from_yaml(parsed.config)
     else:
         config = TrainingConfig()
@@ -100,6 +103,9 @@ def parse_args_to_config(args_list: Optional[List[str]] = None) -> TrainingConfi
             continue
         val = getattr(parsed, f.name, None)
         if val is not None:
-            setattr(config, f.name, val)
+            if f.name == "data_mix":
+                config.data_mix = parse_data_mix_config(val)
+            else:
+                setattr(config, f.name, val)
 
     return config
