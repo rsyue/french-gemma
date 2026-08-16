@@ -17,6 +17,8 @@ This project implements architectures and practices from the **Gemma 3 Paper**: 
 7.  **Robust Distributed Pretraining (DDP)**: Defers `dist.init_process_group` until rank 0 finishes data preparation, utilizing filesystem sentinel polling and configurable `dist_timeout_seconds` to eliminate NCCL communication timeouts.
 8.  **Advanced Training Loops**: Full support for mixed-precision (AMP) training, gradient accumulation, gradient clipping, AdamW optimizer, and Cosine Annealing with Warm Restarts and Warmup.
 9.  **Log & Checkpoint Management**: Reports progress to TensorBoard and retains only the **three best checkpoints** based on validation perplexity.
+10. **Proportional Multi-Dataset Mixing**: Supports configuring multi-dataset mixtures (e.g. Wikipedia 50%, OSCAR 30%, C4 20%) with percentage weights via inline YAML or standalone `--data-mix` configs with deterministic interleaving.
+11. **Interactive Streaming Inference**: Terminal-based chat interface (`inference.py`) with streaming decoding and configurable sampling controls (`do_sample`, `temperature`, `top_p`, `top_k`, `repetition_penalty`).
 
 ---
 
@@ -43,11 +45,12 @@ french_gemma/
 │   ├── run_ddp.sh              # Multi-GPU launcher helper
 │   └── training_example.py     # Standalone simple training example script
 ├── src/
-│   ├── config.py               # YAML configuration parser and dataclass
-│   ├── dataset.py              # Tokenizer, dataset packing, and DataLoaders
+│   ├── config.py               # YAML configuration parser, data mix schemas, and dataclass
+│   ├── dataset.py              # Tokenizer, dataset packing, multi-mix loading, and DataLoaders
 │   ├── model.py                # FrenchGemmaModel wrapper with LM head & noise injection
 │   ├── scheduler.py            # Cosine learning rate restarts and layer freezing
 │   └── trainer.py              # Core pretraining engine loop and checkpointing
+├── inference.py                # Interactive CLI streaming chat interface
 ├── tests/                      # Comprehensive unit and integration test suite
 ├── pyproject.toml              # Project dependencies and tool configurations
 └── README.md                   # This documentation file
@@ -126,10 +129,58 @@ source .venv/bin/activate && torchrun --nproc_per_node=2 -m train.pretrain --con
 > [!NOTE]
 > During multi-GPU runs, Rank 0 handles dataset tokenization and binary packing while worker ranks poll for the `.ready` sentinel file. `torch.distributed.init_process_group` is deferred until data preparation completes, eliminating NCCL heartbeat/watchdog timeouts. The distributed initialization timeout can be adjusted via `dist_timeout_seconds` in your YAML config.
 
-### Running the Simple Training Example Script
-For a lightweight example script demonstrating dataset preparation and model training step-by-step:
+### Multi-Dataset Mixing (`data_mix`)
+You can configure a proportional dataset mix directly in your training YAML configuration or pass a standalone mix file using `--data-mix`:
+
+```yaml
+# configs/my_custom_config.yaml
+model_id: "google/gemma-3-270m-it"
+num_examples: 50000
+data_mix:
+  - dataset_path: "wikimedia/wikipedia"
+    dataset_name: "20231101.fr"
+    percentage: 50.0
+  - dataset_path: "oscar-corpus/OSCAR-2201"
+    dataset_name: "fr"
+    percentage: 30.0
+  - dataset_path: "c4"
+    dataset_name: "fr"
+    percentage: 20.0
+```
+
+Or override dynamically via CLI:
 ```bash
-source .venv/bin/activate && python scripts/training_example.py --config configs/mlx_config.yaml
+source .venv/bin/activate && python -m train.pretrain --config configs/nvidia_config.yaml --data-mix configs/mix_config.yaml --num-examples 10000
+```
+
+---
+
+## Inference & Interactive Chat (`inference.py`)
+
+Run an interactive terminal chat session with text streaming decoding using a pretrained or fine-tuned Gemma 3 model checkpoint:
+
+```bash
+# Launch interactive streaming chat with default generation parameters
+source .venv/bin/activate && python inference.py --model google/gemma-3-270m-it
+```
+
+### Configurable Generation Sampling Parameters
+All generation hyperparameters can be customized from the command line:
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `--model` | `str` | `google/gemma-3-270m-it` | Model identifier or local checkpoint path |
+| `--max-len` | `int` | `2048` | Context window length for generation |
+| `--dtype` | `str` | `bfloat16` | PyTorch dtype (`bfloat16`, `float16`, `float32`) |
+| `--do-sample` / `--no-sample` | `bool` | `True` | Whether to use sampling instead of greedy decoding |
+| `--temperature` | `float` | `0.7` | Temperature for logit modulation |
+| `--top-p` | `float` | `0.95` | Nucleus sampling probability threshold |
+| `--top-k` | `int` | `65` | Top-k tokens considered during sampling |
+| `--repetition-penalty` | `float` | `1.5` | Penalty factor for repeating tokens |
+
+Example with custom sampling parameters:
+```bash
+source .venv/bin/activate && python inference.py --model ./checkpoints/best_model --temperature 0.8 --top-p 0.90 --top-k 50 --repetition-penalty 1.3
 ```
 
 ---
