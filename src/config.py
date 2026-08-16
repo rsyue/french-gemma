@@ -130,6 +130,9 @@ class TrainingConfig:
     packing_log_interval: int = 10
     dist_timeout_seconds: int = 7200
     seed: int = 42
+    dpo_beta: float = 0.1
+    dpo_label_smoothing: float = 0.0
+    ref_model_id: Optional[str] = None
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "TrainingConfig":

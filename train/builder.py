@@ -10,6 +10,7 @@ import torch.nn as nn
 
 from src.config import TrainingConfig
 from train.base import AbstractTrainingStrategy, BaseTrainer, StrategyType, TrainingStrategyProtocol
+from train.strategies.dpo import DPOStrategy
 from train.strategies.pretrain import PretrainStrategy
 from train.strategies.sft import SFTStrategy
 
@@ -91,6 +92,8 @@ class TrainingFactory:
                 return PretrainStrategy()
             if strategy_lower in ("sft", "supervised", "chat"):
                 return SFTStrategy()
+            if strategy_lower in ("dpo", "preference", "rlhf", "rl"):
+                return DPOStrategy()
             raise ValueError(f"Unknown training strategy string: '{strategy}'")
         raise TypeError(f"Invalid strategy type provided: {type(strategy)}")
 
