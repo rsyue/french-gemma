@@ -50,6 +50,37 @@ def test_parse_args_packing_batch_size():
     assert config_underscore.packing_batch_size == 1500
 
 
+def test_parse_args_save_dir():
+    """Verify --save-dir and --save_dir override output_dir and save_dir."""
+    config_dash = parse_args_to_config(["--save-dir", "./custom_save_dir"])
+    assert config_dash.output_dir == "./custom_save_dir"
+    assert config_dash.save_dir == "./custom_save_dir"
+
+    config_under = parse_args_to_config(["--save_dir", "./another_dir"])
+    assert config_under.output_dir == "./another_dir"
+    assert config_under.save_dir == "./another_dir"
+
+
+def test_parse_args_modality_defaults():
+    """Verify modality parameter automatically sets separated default directories inside ./checkpoints."""
+    config_pretrain = parse_args_to_config([], modality="pretrain")
+    assert config_pretrain.output_dir == "./checkpoints/pretrain"
+    assert config_pretrain.save_dir == "./checkpoints/pretrain"
+
+    config_sft = parse_args_to_config([], modality="sft")
+    assert config_sft.output_dir == "./checkpoints/sft"
+    assert config_sft.save_dir == "./checkpoints/sft"
+
+    config_dpo = parse_args_to_config([], modality="dpo")
+    assert config_dpo.output_dir == "./checkpoints/dpo"
+    assert config_dpo.save_dir == "./checkpoints/dpo"
+
+    # CLI argument overrides modality default
+    config_override = parse_args_to_config(["--save-dir", "./custom_dpo"], modality="dpo")
+    assert config_override.output_dir == "./custom_dpo"
+    assert config_override.save_dir == "./custom_dpo"
+
+
 def test_multi_epoch_loop_logic():
     """Verify multi-epoch loop logic runs past epoch 0 until max_steps is reached."""
     max_steps = 10

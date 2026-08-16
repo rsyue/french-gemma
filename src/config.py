@@ -111,7 +111,7 @@ class TrainingConfig:
     amp_enabled: bool = True
     amp_dtype: str = "bfloat16"
     log_interval: int = 50
-    save_interval: int = 1000
+    save_interval: int = 500
     eval_interval: int = 500
     num_workers: int = 2
     prefetch_factor: int = 2
@@ -130,6 +130,27 @@ class TrainingConfig:
     packing_log_interval: int = 10
     dist_timeout_seconds: int = 7200
     seed: int = 42
+    dpo_beta: float = 0.1
+    dpo_label_smoothing: float = 0.0
+    ref_model_id: Optional[str] = None
+    save_dir: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.save_dir is not None:
+            self.output_dir = self.save_dir
+        else:
+            self.save_dir = self.output_dir
+
+        if not self.output_dir or not self.output_dir.strip():
+            raise ValueError("output_dir / save_dir must be a non-empty path string.")
+        if self.max_checkpoints < 1:
+            raise ValueError(f"max_checkpoints must be >= 1, got {self.max_checkpoints}")
+        if self.eval_interval < 1:
+            raise ValueError(f"eval_interval must be >= 1, got {self.eval_interval}")
+        if self.log_interval < 1:
+            raise ValueError(f"log_interval must be >= 1, got {self.log_interval}")
+        if self.batch_size < 1:
+            raise ValueError(f"batch_size must be >= 1, got {self.batch_size}")
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "TrainingConfig":
@@ -140,6 +161,11 @@ class TrainingConfig:
 
         if not data or not isinstance(data, dict):
             data = {}
+
+        if "save_dir" in data and ("output_dir" not in data or data["output_dir"] is None):
+            data["output_dir"] = data["save_dir"]
+        elif "output_dir" in data and ("save_dir" not in data or data["save_dir"] is None):
+            data["save_dir"] = data["output_dir"]
 
         if "freeze_schedule" in data and data["freeze_schedule"] is not None:
             data["freeze_schedule"] = {int(k): list(v) for k, v in data["freeze_schedule"].items()}

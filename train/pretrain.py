@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 def main() -> None:
     """Main CLI entrypoint for French Gemma 3 pretraining."""
-    config = parse_args_to_config()
+    config = parse_args_to_config(modality="pretrain")
 
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision("high")
@@ -227,6 +227,9 @@ def main() -> None:
         while global_step < config.max_steps:
             global_step = trainer.train_epoch(epoch=epoch, global_step=global_step)
             epoch += 1
+
+        if global_step % config.eval_interval != 0:
+            trainer.evaluate(global_step)
     finally:
         trainer.close()
         if is_distributed and dist.is_initialized():

@@ -161,6 +161,31 @@ class PackedTextDataset(Dataset[Dict[str, Any]]):
         }
 
 
+GEMMA_CHAT_TEMPLATE = (
+    "{{ bos_token }}"
+    "{% if messages and messages[0]['role'] == 'system' %}"
+    "{% set loop_messages = messages[1:] %}"
+    "{% set system_message = messages[0]['content'] %}"
+    "{% else %}"
+    "{% set loop_messages = messages %}"
+    "{% set system_message = false %}"
+    "{% endif %}"
+    "{% if system_message %}"
+    "{{ '<start_of_turn>system\\n' + system_message + '<end_of_turn>\\n' }}"
+    "{% endif %}"
+    "{% for message in loop_messages %}"
+    "{% if message['role'] == 'user' %}"
+    "{{ '<start_of_turn>user\\n' + message['content'] + '<end_of_turn>\\n' }}"
+    "{% elif message['role'] == 'model' or message['role'] == 'assistant' %}"
+    "{{ '<start_of_turn>model\\n' + message['content'] + '<end_of_turn>\\n' }}"
+    "{% endif %}"
+    "{% endfor %}"
+    "{% if add_generation_prompt %}"
+    "{{ '<start_of_turn>model\\n' }}"
+    "{% endif %}"
+)
+
+
 def train_custom_tokenizer(
     texts: Iterable[str],
     vocab_size: int = 32000,
@@ -168,7 +193,8 @@ def train_custom_tokenizer(
     special_tokens: Optional[List[str]] = None,
 ) -> PreTrainedTokenizerFast:
     """
-    Trains a custom ByteLevelBPETokenizer on provided texts and saves it as a HuggingFace PreTrainedTokenizerFast.
+    Trains a custom ByteLevelBPETokenizer on provided texts and saves it as a HuggingFace PreTrainedTokenizerFast
+    with Gemma 3 turn tokens and chat template.
     """
     from collections.abc import Sized
     num_docs_str = f"{len(texts)}" if isinstance(texts, Sized) else "unknown number of"
@@ -176,7 +202,7 @@ def train_custom_tokenizer(
     t0 = time.time()
     os.makedirs(save_dir, exist_ok=True)
     if special_tokens is None:
-        special_tokens = ["<pad>", "<bos>", "<eos>", "<unk>"]
+        special_tokens = ["<pad>", "<bos>", "<eos>", "<unk>", "<start_of_turn>", "<end_of_turn>"]
 
     tokenizer = ByteLevelBPETokenizer()
     tokenizer.train_from_iterator(
@@ -189,12 +215,14 @@ def train_custom_tokenizer(
     tokenizer_json_path = os.path.join(save_dir, "tokenizer.json")
     tokenizer.save(tokenizer_json_path)
 
+    extra_special_tokens = [t for t in special_tokens if t not in ("<pad>", "<bos>", "<eos>", "<unk>")]
     hf_tokenizer = PreTrainedTokenizerFast(  # type: ignore[no-untyped-call]
         tokenizer_file=tokenizer_json_path,
         bos_token="<bos>" if "<bos>" in special_tokens else None,
         eos_token="<eos>" if "<eos>" in special_tokens else None,
         pad_token="<pad>" if "<pad>" in special_tokens else None,
         unk_token="<unk>" if "<unk>" in special_tokens else None,
+        additional_special_tokens=extra_special_tokens if extra_special_tokens else None,
     )
 
     hf_tokenizer.padding_side = "right"
@@ -202,6 +230,7 @@ def train_custom_tokenizer(
     hf_tokenizer.bos_token_id = special_tokens.index("<bos>") if "<bos>" in special_tokens else 1
     hf_tokenizer.eos_token_id = special_tokens.index("<eos>") if "<eos>" in special_tokens else 2
     hf_tokenizer.unk_token_id = special_tokens.index("<unk>") if "<unk>" in special_tokens else 3
+    hf_tokenizer.chat_template = GEMMA_CHAT_TEMPLATE
 
     hf_tokenizer.save_pretrained(save_dir)
     t_train = time.time() - t0

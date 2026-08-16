@@ -4,7 +4,10 @@ Dynamic CLI argument parser and TrainingConfig plumbing for train package.
 
 import argparse
 import dataclasses
+import os
 from typing import Any, Dict, List, Optional, Union, get_args, get_origin
+
+import yaml
 
 from src.config import TrainingConfig, parse_data_mix_config
 
@@ -33,10 +36,14 @@ def str_or_int(val: Any) -> Union[int, str]:
     return str(val)
 
 
-def parse_args_to_config(args_list: Optional[List[str]] = None) -> TrainingConfig:
+def parse_args_to_config(
+    args_list: Optional[List[str]] = None,
+    modality: Optional[str] = None,
+) -> TrainingConfig:
     """
     Parses CLI overrides dynamically based on TrainingConfig fields,
     merges them with YAML configuration values, and uses defaults if not present.
+    Supports modality-specific default save directories (e.g. ./checkpoints/pretrain).
     """
     parser = argparse.ArgumentParser(description="French Gemma 3 Pretraining & Training CLI Launcher")
     parser.add_argument(
@@ -93,7 +100,13 @@ def parse_args_to_config(args_list: Optional[List[str]] = None) -> TrainingConfi
 
     parsed = parser.parse_args(args_list)
 
+    yaml_has_save_dir = False
     if parsed.config:
+        if os.path.exists(parsed.config):
+            with open(parsed.config, "r", encoding="utf-8") as yaml_file:
+                raw_yaml = yaml.safe_load(yaml_file)
+                if isinstance(raw_yaml, dict):
+                    yaml_has_save_dir = "save_dir" in raw_yaml or "output_dir" in raw_yaml
         config = TrainingConfig.from_yaml(parsed.config)
     else:
         config = TrainingConfig()
@@ -107,5 +120,17 @@ def parse_args_to_config(args_list: Optional[List[str]] = None) -> TrainingConfi
                 config.data_mix = parse_data_mix_config(val)
             else:
                 setattr(config, f.name, val)
+
+    # CLI override synchronization
+    if parsed.save_dir is not None:
+        config.save_dir = parsed.save_dir
+        config.output_dir = parsed.save_dir
+    elif parsed.output_dir is not None:
+        config.output_dir = parsed.output_dir
+        config.save_dir = parsed.output_dir
+    elif not yaml_has_save_dir and modality:
+        modality_dir = f"./checkpoints/{modality.lower().strip()}"
+        config.output_dir = modality_dir
+        config.save_dir = modality_dir
 
     return config

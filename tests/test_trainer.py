@@ -104,24 +104,78 @@ def test_best_checkpoint_rotation():
             amp_enabled=False,
             output_dir=tmpdir,
             tb_log_dir=os.path.join(tmpdir, "runs"),
+            max_checkpoints=2,
         )
 
         # Save 3 checkpoints with decreasing perplexity (lower is better)
-        trainer.save_best_checkpoint(global_step=1, perplexity=100.0)
-        trainer.save_best_checkpoint(global_step=2, perplexity=80.0)
+        trainer.save_best_checkpoint(global_step=1, metric=100.0)
+        trainer.save_best_checkpoint(global_step=2, metric=80.0)
 
         # We should have 2 checkpoints saved
         chkpts = [f for f in os.listdir(tmpdir) if f.startswith("checkpoint-step-")]
         assert len(chkpts) == 2
 
         # Save a 3rd one that is better (ppl=40)
-        trainer.save_best_checkpoint(global_step=3, perplexity=40.0)
+        trainer.save_best_checkpoint(global_step=3, metric=40.0)
 
         # Should still have only 2 checkpoints (the one with ppl=100.0 should be deleted)
         chkpts_after = [f for f in os.listdir(tmpdir) if f.startswith("checkpoint-step-")]
         assert len(chkpts_after) == 2
         assert not any("ppl-100.00" in name for name in chkpts_after)
         assert any("ppl-40.00" in name for name in chkpts_after)
+        trainer.close()
+
+
+def test_top5_checkpoint_rotation():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        class MockModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = torch.nn.Linear(10, 10)
+
+            def state_dict(self):
+                return {"weights": torch.ones(10)}
+
+        class MockOptimizer:
+            def state_dict(self):
+                return {}
+
+        trainer = Pretrainer(
+            model=MockModel(),
+            tokenizer=None,
+            train_dataloader=None,
+            val_dataloader=None,
+            optimizer=MockOptimizer(),
+            lr_scheduler=None,
+            freeze_manager=None,
+            device="cpu",
+            amp_enabled=False,
+            output_dir=tmpdir,
+            tb_log_dir=os.path.join(tmpdir, "runs"),
+            max_checkpoints=5,
+        )
+
+        # Save 5 checkpoints with decreasing perplexity
+        for step, ppl in enumerate([100.0, 90.0, 80.0, 70.0, 60.0], start=1):
+            trainer.save_best_checkpoint(global_step=step, metric=ppl)
+
+        chkpts = [f for f in os.listdir(tmpdir) if f.startswith("checkpoint-step-")]
+        assert len(chkpts) == 5
+
+        # 6th checkpoint that is worse than all 5 (ppl=120.0) -> should not be saved
+        saved = trainer.save_best_checkpoint(global_step=6, metric=120.0)
+        assert not saved
+        chkpts = [f for f in os.listdir(tmpdir) if f.startswith("checkpoint-step-")]
+        assert len(chkpts) == 5
+        assert not any("step-6" in name for name in chkpts)
+
+        # 7th checkpoint that is better than the worst (ppl=50.0) -> replaces step 1 (ppl=100.0)
+        saved = trainer.save_best_checkpoint(global_step=7, metric=50.0)
+        assert saved
+        chkpts_after = [f for f in os.listdir(tmpdir) if f.startswith("checkpoint-step-")]
+        assert len(chkpts_after) == 5
+        assert not any("ppl-100.00" in name for name in chkpts_after)
+        assert any("step-7" in name for name in chkpts_after)
         trainer.close()
 
 
@@ -152,6 +206,7 @@ def test_best_loss_checkpoint_rotation():
             amp_enabled=False,
             output_dir=tmpdir,
             tb_log_dir=os.path.join(tmpdir, "runs"),
+            max_checkpoints=3,
         )
 
         # Save 4 checkpoints with decreasing training loss (lower is better)
