@@ -109,11 +109,29 @@ def main() -> None:
         else None
     )
     pairs = load_dpo_pairs(dpo_data_path)
+    if pairs:
+        sample_pair = pairs[0]
+        logger.info("=" * 70)
+        logger.info("DPO Preference Pair Sample Verification (before tokenization):")
+        logger.info("-" * 70)
+        prompt_txt = sample_pair.get("prompt", "")
+        chosen_txt = sample_pair.get("chosen", "")
+        rejected_txt = sample_pair.get("rejected", "")
+        logger.info(f"  [Prompt]: {prompt_txt}")
+        logger.info(f"  [Chosen Response]: {chosen_txt}")
+        logger.info(f"  [Rejected Response]: {rejected_txt}")
+        logger.info("=" * 70)
+
+    logger.info(
+        f"Tokenizing and indexing {len(pairs)} DPO preference pairs "
+        f"(max_sequence_length={config.max_sequence_length})..."
+    )
     dpo_dataset = DPODataset(
         pairs=pairs,
         tokenizer=tokenizer,
         max_seq_len=config.max_sequence_length,
     )
+    logger.info(f"Tokenization complete: {len(dpo_dataset)} active preference pairs indexed.")
 
     dataloader = get_dpo_dataloader(
         dataset=dpo_dataset,
@@ -122,6 +140,11 @@ def main() -> None:
         num_workers=config.num_workers,
         pin_memory=config.pin_memory,
         seed=config.seed,
+    )
+    logger.info(
+        f"DataLoader ready: batch_size={config.batch_size}, "
+        f"gradient_accumulation_steps={config.gradient_accumulation_steps} "
+        f"(effective batch size: {config.batch_size * config.gradient_accumulation_steps})."
     )
 
     logger.info("Initializing Policy Model for DPO...")
@@ -226,12 +249,25 @@ def main() -> None:
                         logger.warning(f"Failed to remove checkpoint {worst_path}: {e}")
                 best_checkpoints.remove(worst_to_delete)
 
-    logger.info(f"Starting DPO alignment loop for {config.max_steps} steps...")
+    step_start_time = time.time()
+    warmup_steps = config.warmup_steps or int(config.max_steps * (config.warmup_ratio or 0.03))
+    logger.info(
+        f"Starting DPO alignment loop for {config.max_steps} steps "
+        f"(Warmup: {warmup_steps} steps | Initial LR: {scheduler.get_last_lr()[0]:.2e} -> "
+        f"Target: {config.learning_rate:.2e} | Log interval: every {config.log_interval} steps | "
+        f"Eval/Save interval: every {config.eval_interval} steps)..."
+    )
     try:
         while step < config.max_steps:
             for batch in dataloader:
                 if step >= config.max_steps:
                     break
+
+                if (step == 0 or step < 3) and config.gradient_accumulation_steps > 1:
+                    logger.info(
+                        f"[Step {step + 1}/{config.max_steps}] Processing micro-batch "
+                        f"{accum_batches + 1}/{config.gradient_accumulation_steps}..."
+                    )
 
                 prepared_batch = strategy.prepare_batch(batch, config.device)
                 with torch.amp.autocast(  # type: ignore[attr-defined]
@@ -254,17 +290,20 @@ def main() -> None:
                     accum_loss = 0.0
                     accum_batches = 0
 
-                    if step % config.log_interval == 0:
+                    if step == 1 or step % config.log_interval == 0 or step == config.max_steps:
                         current_lr = scheduler.get_last_lr()[0]
                         elapsed = time.time() - t0
+                        step_time = time.time() - step_start_time
                         metrics = strategy.latest_metrics
                         reward_acc = metrics.get("reward_accuracy", 0.0)
                         reward_margin = metrics.get("reward_margin", 0.0)
+                        phase = f"Warmup ({step}/{warmup_steps})" if step <= warmup_steps else "Training"
                         logger.info(
-                            f"Step {step}/{config.max_steps} | DPO Loss: {step_loss:.4f} | "
+                            f"Step {step}/{config.max_steps} [{phase}] | DPO Loss: {step_loss:.4f} | "
                             f"Reward Acc: {reward_acc * 100:.1f}% | Margin: {reward_margin:.4f} | "
-                            f"LR: {current_lr:.2e} | Elapsed: {elapsed:.1f}s"
+                            f"LR: {current_lr:.2e} | Step Time: {step_time:.2f}s | Total Elapsed: {elapsed:.1f}s"
                         )
+                    step_start_time = time.time()
 
                     # Combined eval and save interval
                     if step % config.eval_interval == 0 or step == config.max_steps:

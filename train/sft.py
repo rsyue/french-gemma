@@ -104,11 +104,35 @@ def main() -> None:
         logger.warning("No conversations loaded from data source. Falling back to default French dialogues.")
         conversations = DEFAULT_FRENCH_CONVERSATIONS
 
+    # Display an example of the applied chat template before tokenization for verification
+    if conversations:
+        sample_conv = conversations[0]
+        try:
+            rendered_sample = tokenizer.apply_chat_template(sample_conv, tokenize=False)
+        except Exception:
+            rendered_sample = ""
+            for m in sample_conv:
+                role = m.get("role", "user")
+                content = m.get("content", "")
+                rendered_sample += f"<start_of_turn>{role}\n{content}<end_of_turn>\n"
+
+        logger.info("=" * 70)
+        logger.info("Chat Template Sample Verification (before tokenization):")
+        logger.info("-" * 70)
+        for line in rendered_sample.strip().splitlines():
+            logger.info(f"  {line}")
+        logger.info("=" * 70)
+
+    logger.info(
+        f"Tokenizing and indexing {len(conversations)} SFT conversation samples "
+        f"(max_sequence_length={config.max_sequence_length})..."
+    )
     sft_dataset = SFTDataset(
         conversations=conversations,
         tokenizer=tokenizer,
         max_seq_len=config.max_sequence_length,
     )
+    logger.info(f"Tokenization complete: {len(sft_dataset)} active conversational samples indexed.")
 
     dataloader = get_sft_dataloader(
         dataset=sft_dataset,
@@ -117,6 +141,11 @@ def main() -> None:
         num_workers=config.num_workers,
         pin_memory=config.pin_memory,
         seed=config.seed,
+    )
+    logger.info(
+        f"DataLoader ready: batch_size={config.batch_size}, "
+        f"gradient_accumulation_steps={config.gradient_accumulation_steps} "
+        f"(effective batch size: {config.batch_size * config.gradient_accumulation_steps})."
     )
 
     logger.info("Initializing French Gemma model for SFT...")
@@ -148,6 +177,7 @@ def main() -> None:
     accum_loss = 0.0
     accum_batches = 0
     t0 = time.time()
+    step_start_time = time.time()
 
     os.makedirs(config.output_dir, exist_ok=True)
     best_checkpoints: List[Dict[str, Any]] = []
@@ -197,12 +227,24 @@ def main() -> None:
                         logger.warning(f"Failed to remove checkpoint {worst_path}: {e}")
                 best_checkpoints.remove(worst_to_delete)
 
-    logger.info(f"Starting SFT optimization loop for {config.max_steps} steps...")
+    warmup_steps = config.warmup_steps or int(config.max_steps * (config.warmup_ratio or 0.03))
+    logger.info(
+        f"Starting SFT optimization loop for {config.max_steps} steps "
+        f"(Warmup: {warmup_steps} steps | Initial LR: {scheduler.get_last_lr()[0]:.2e} -> "
+        f"Target: {config.learning_rate:.2e} | Log interval: every {config.log_interval} steps | "
+        f"Eval/Save interval: every {config.eval_interval} steps)..."
+    )
     try:
         while step < config.max_steps:
             for batch in dataloader:
                 if step >= config.max_steps:
                     break
+
+                if (step == 0 or step < 3) and config.gradient_accumulation_steps > 1:
+                    logger.info(
+                        f"[Step {step + 1}/{config.max_steps}] Processing micro-batch "
+                        f"{accum_batches + 1}/{config.gradient_accumulation_steps}..."
+                    )
 
                 prepared_batch = strategy.prepare_batch(batch, config.device)
                 with torch.amp.autocast(  # type: ignore[attr-defined]
@@ -225,13 +267,17 @@ def main() -> None:
                     accum_loss = 0.0
                     accum_batches = 0
 
-                    if step % config.log_interval == 0:
+                    if step == 1 or step % config.log_interval == 0 or step == config.max_steps:
                         current_lr = scheduler.get_last_lr()[0]
                         elapsed = time.time() - t0
+                        step_time = time.time() - step_start_time
+                        phase = f"Warmup ({step}/{warmup_steps})" if step <= warmup_steps else "Training"
                         logger.info(
-                            f"Step {step}/{config.max_steps} | Loss: {step_loss:.4f} | "
-                            f"LR: {current_lr:.2e} | Elapsed: {elapsed:.1f}s"
+                            f"Step {step}/{config.max_steps} [{phase}] | "
+                            f"Loss: {step_loss:.4f} | LR: {current_lr:.2e} | "
+                            f"Step Time: {step_time:.2f}s | Total Elapsed: {elapsed:.1f}s"
                         )
+                    step_start_time = time.time()
 
                     # Combined eval and save interval
                     if step % config.eval_interval == 0 or step == config.max_steps:
