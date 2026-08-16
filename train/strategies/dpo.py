@@ -52,6 +52,8 @@ class DPOStrategy(AbstractTrainingStrategy):
         if chosen_mask is not None and rejected_mask is not None:
             batch_attention_mask = torch.cat([chosen_mask, rejected_mask], dim=0)
 
+        all_labels = torch.cat([chosen_labels, rejected_labels], dim=0)
+
         # Policy forward pass
         policy_outputs = model(input_ids=batch_input_ids, attention_mask=batch_attention_mask)
         policy_logits: Any = getattr(policy_outputs, "logits", policy_outputs)
@@ -59,14 +61,16 @@ class DPOStrategy(AbstractTrainingStrategy):
             policy_logits = policy_logits[0]
 
         bs = chosen_input_ids.shape[0]
-        policy_chosen_logits = policy_logits[:bs]
-        policy_rejected_logits = policy_logits[bs:]
-
-        policy_chosen_logps = get_batch_logps(policy_chosen_logits, chosen_labels)
-        policy_rejected_logps = get_batch_logps(policy_rejected_logits, rejected_labels)
+        all_policy_logps = get_batch_logps(policy_logits, all_labels)
+        policy_chosen_logps = all_policy_logps[:bs]
+        policy_rejected_logps = all_policy_logps[bs:]
 
         # Reference forward pass
         if self.ref_model is not None:
+            ref_params = list(self.ref_model.parameters())
+            if ref_params and ref_params[0].device != batch_input_ids.device:
+                self.ref_model.to(batch_input_ids.device)
+
             with torch.no_grad():
                 ref_outputs = self.ref_model(
                     input_ids=batch_input_ids, attention_mask=batch_attention_mask
@@ -74,11 +78,10 @@ class DPOStrategy(AbstractTrainingStrategy):
                 ref_logits: Any = getattr(ref_outputs, "logits", ref_outputs)
                 if isinstance(ref_logits, tuple):
                     ref_logits = ref_logits[0]
-                ref_chosen_logits = ref_logits[:bs]
-                ref_rejected_logits = ref_logits[bs:]
 
-                ref_chosen_logps = get_batch_logps(ref_chosen_logits, chosen_labels)
-                ref_rejected_logps = get_batch_logps(ref_rejected_logits, rejected_labels)
+                all_ref_logps = get_batch_logps(ref_logits, all_labels)
+                ref_chosen_logps = all_ref_logps[:bs]
+                ref_rejected_logps = all_ref_logps[bs:]
         else:
             # If no reference model is provided, reference logps default to zeros
             ref_chosen_logps = torch.zeros_like(policy_chosen_logps)

@@ -41,10 +41,7 @@ def get_batch_logps(
     shift_labels = labels[..., 1:].contiguous()
 
     loss_mask = shift_labels != ignore_index
-
-    # Clamp ignored indices to zero to prevent gather IndexError
-    clamped_labels = shift_labels.clone()
-    clamped_labels[~loss_mask] = 0
+    clamped_labels = shift_labels.masked_fill(~loss_mask, 0)
 
     log_probs = shift_logits.log_softmax(dim=-1)
     per_token_logps = torch.gather(

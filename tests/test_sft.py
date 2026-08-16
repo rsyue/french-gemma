@@ -154,3 +154,98 @@ def test_sft_strategy_compute_loss():
 def test_training_factory_builds_sft_strategy():
     strategy = TrainingFactory.build_strategy("sft")
     assert isinstance(strategy, SFTStrategy)
+
+
+def test_format_multi_turn_messages_with_prompt_mask(mock_tokenizer):
+    messages = [
+        {"role": "user", "content": "Question 1"},
+        {"role": "assistant", "content": "Réponse 1"},
+        {"role": "user", "content": "Question 2"},
+        {"role": "assistant", "content": "Réponse 2"},
+    ]
+
+    input_ids, labels = format_messages_with_prompt_mask(
+        messages=messages,
+        tokenizer=mock_tokenizer,
+        max_seq_len=128,
+    )
+
+    # Decode and check that user turns have label -100 and assistant turns have active labels
+    assert len(input_ids) == 128
+    assert len(labels) == 128
+
+    # First turn prompt should be masked
+    u1_prefix = "<bos><start_of_turn>user\nQuestion 1<end_of_turn>\n<start_of_turn>model\n"
+    u1_len = len(mock_tokenizer.encode(u1_prefix, add_special_tokens=False))
+    for i in range(u1_len):
+        assert labels[i] == -100
+
+    # First assistant response should be unmasked
+    a1_str = "Réponse 1<end_of_turn>\n"
+    a1_len = len(mock_tokenizer.encode(a1_str, add_special_tokens=False))
+    for j in range(a1_len):
+        pos = u1_len + j
+        assert labels[pos] == input_ids[pos]
+
+
+def test_normalize_conversation_sharegpt():
+    from src.sft_dataset import normalize_conversation
+
+    sharegpt_item = [
+        {"from": "human", "value": "Bonjour !"},
+        {"from": "gpt", "value": "Salut !"},
+    ]
+    normalized = normalize_conversation(sharegpt_item)
+    assert len(normalized) == 2
+    assert normalized[0] == {"role": "user", "content": "Bonjour !"}
+    assert normalized[1] == {"role": "assistant", "content": "Salut !"}
+
+
+def test_sft_strategy_compute_loss_raw_logits_fallback():
+    strategy = SFTStrategy()
+
+    class RawLogitsModel(nn.Module):
+        def forward(self, input_ids, labels=None, attention_mask=None):
+            # Return raw tensor of logits (batch=2, seq=3, vocab=5)
+            logits = torch.zeros(2, 3, 5)
+            # Make target token have higher logit
+            for i in range(2):
+                for j in range(2):
+                    logits[i, j, 2] = 5.0
+            return logits
+
+    model = RawLogitsModel()
+    batch = {
+        "input_ids": torch.tensor([[1, 2, 3], [4, 5, 6]]),
+        "labels": torch.tensor([[-100, 2, 3], [-100, -100, 2]]),
+        "attention_mask": torch.tensor([[1, 1, 1], [1, 1, 1]]),
+    }
+
+    loss = strategy.compute_loss(model, batch)
+    assert isinstance(loss, torch.Tensor)
+    assert loss.item() >= 0.0
+
+
+def test_load_sft_conversations_file_handling(tmp_path):
+    import json
+
+    from train.sft import load_sft_conversations
+
+    # Non-existent file raises FileNotFoundError
+    with pytest.raises(FileNotFoundError):
+        load_sft_conversations(str(tmp_path / "missing.jsonl"))
+
+    # Valid JSON file
+    json_path = tmp_path / "sft.json"
+    data = [
+        [
+            {"role": "user", "content": "Test user"},
+            {"role": "assistant", "content": "Test assistant"},
+        ]
+    ]
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+
+    loaded = load_sft_conversations(str(json_path))
+    assert len(loaded) == 1
+    assert loaded[0][0]["content"] == "Test user"

@@ -51,14 +51,19 @@ DEFAULT_FRENCH_DPO_PAIRS = [
 
 def load_dpo_pairs(data_path: Optional[str] = None) -> List[Any]:
     """Loads DPO preference pairs from JSON/JSONL file or returns default French preference pairs."""
-    if data_path and os.path.exists(data_path):
+    if data_path is not None:
+        if not os.path.exists(data_path):
+            raise FileNotFoundError(f"DPO dataset file not found: {data_path}")
         logger.info(f"Loading DPO preference data from {data_path}...")
         pairs: List[Any] = []
         if data_path.endswith(".jsonl"):
             with open(data_path, "r", encoding="utf-8") as f:
-                for line in f:
+                for idx, line in enumerate(f, start=1):
                     if line.strip():
-                        pairs.append(json.loads(line.strip()))
+                        try:
+                            pairs.append(json.loads(line.strip()))
+                        except json.JSONDecodeError as err:
+                            raise ValueError(f"Malformed JSONL at {data_path}:{idx}: {err}") from err
         else:
             with open(data_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -66,6 +71,8 @@ def load_dpo_pairs(data_path: Optional[str] = None) -> List[Any]:
                     pairs = data
                 elif isinstance(data, dict) and "data" in data:
                     pairs = data["data"]
+        if not pairs:
+            raise ValueError(f"No preference pairs loaded from {data_path}")
         return pairs
 
     logger.info("Using default French preference alignment dataset.")
@@ -106,7 +113,12 @@ def main() -> None:
             save_dir=tokenizer_dir,
         )
 
-    pairs = load_dpo_pairs()
+    dpo_data_path = (
+        config.dataset_path
+        if config.dataset_path and config.dataset_path != "wikimedia/wikipedia"
+        else None
+    )
+    pairs = load_dpo_pairs(dpo_data_path)
     dpo_dataset = DPODataset(
         pairs=pairs,
         tokenizer=tokenizer,

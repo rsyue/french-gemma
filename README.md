@@ -18,7 +18,9 @@ This project implements architectures and practices from the **Gemma 3 Paper**: 
 8.  **Advanced Training Loops**: Full support for mixed-precision (AMP) training, gradient accumulation, gradient clipping, AdamW optimizer, and Cosine Annealing with Warm Restarts and Warmup.
 9.  **Log & Checkpoint Management**: Reports progress to TensorBoard and retains only the **three best checkpoints** based on validation perplexity.
 10. **Proportional Multi-Dataset Mixing**: Supports configuring multi-dataset mixtures (e.g. Wikipedia 50%, OSCAR 30%, C4 20%) with percentage weights via inline YAML or standalone `--data-mix` configs with deterministic interleaving.
-11. **Interactive Streaming Inference**: Terminal-based chat interface (`inference.py`) with streaming decoding and configurable sampling controls (`do_sample`, `temperature`, `top_p`, `top_k`, `repetition_penalty`).
+11. **Supervised Fine-Tuning (SFT)**: Turn-based dialogue fine-tuning (`train/sft.py`) utilizing Gemma 3 turn markers (`<start_of_turn>`, `<end_of_turn>`) and prompt loss masking (`labels = -100` on user tokens).
+12. **Direct Preference Optimization (DPO)**: Alignment and RL optimization (`train/dpo.py`) using frozen reference-model log-probabilities and $\beta$ reward margins.
+13. **Interactive Streaming Inference**: Terminal-based chat interface (`inference.py`) with streaming decoding and configurable sampling controls (`do_sample`, `temperature`, `top_p`, `top_k`, `repetition_penalty`).
 
 ---
 
@@ -33,20 +35,26 @@ french_gemma/
 ├── hooks/
 │   └── README.md               # Developer environment commands and rules
 ├── train/
-│   ├── __init__.py             # Package exports (BaseTrainer, TrainingFactory, PretrainStrategy)
+│   ├── __init__.py             # Package exports (BaseTrainer, TrainingFactory, strategies)
 │   ├── base.py                 # Abstract base classes, protocols, and StrategyType unions
 │   ├── builder.py              # ModularTrainer and dependency injection TrainingFactory
 │   ├── cli.py                  # Dynamic CLI argument parser & TrainingConfig plumbing
-│   ├── pretrain.py             # CLI entrypoint executable via python -m train.pretrain
+│   ├── pretrain.py             # Pretraining CLI entrypoint (python -m train.pretrain)
+│   ├── sft.py                  # Supervised Fine-Tuning entrypoint (python -m train.sft)
+│   ├── dpo.py                  # Direct Preference Optimization entrypoint (python -m train.dpo)
 │   └── strategies/
 │       ├── base.py             # AbstractTrainingStrategy base definition
-│       └── pretrain.py         # Causal Language Model pretraining strategy
+│       ├── pretrain.py         # Causal Language Model pretraining strategy
+│       ├── sft.py              # SFT prompt-masked loss strategy
+│       └── dpo.py              # DPO reference-model preference loss strategy
 ├── scripts/
 │   ├── run_ddp.sh              # Multi-GPU launcher helper
 │   └── training_example.py     # Standalone simple training example script
 ├── src/
-│   ├── config.py               # YAML configuration parser, data mix schemas, and dataclass
-│   ├── dataset.py              # Tokenizer, dataset packing, multi-mix loading, and DataLoaders
+│   ├── config.py               # YAML configuration parser, data mix schemas, DPO configs
+│   ├── dataset.py              # Tokenizer with Gemma 3 turn tokens, packing, and DataLoaders
+│   ├── sft_dataset.py          # Conversational SFT dataset and prompt masking
+│   ├── dpo_dataset.py          # Preference DPO dataset and sequence log-prob extraction
 │   ├── model.py                # FrenchGemmaModel wrapper with LM head & noise injection
 │   ├── scheduler.py            # Cosine learning rate restarts and layer freezing
 │   └── trainer.py              # Core pretraining engine loop and checkpointing
@@ -152,6 +160,40 @@ Or override dynamically via CLI:
 ```bash
 source .venv/bin/activate && python -m train.pretrain --config configs/nvidia_config.yaml --data-mix configs/mix_config.yaml --num-examples 10000
 ```
+
+---
+
+## Supervised Fine-Tuning (SFT) (`python -m train.sft`)
+
+Run turn-based conversational fine-tuning on dialogues using the standard Gemma 3 turn format (`<start_of_turn>`, `<end_of_turn>`) with prompt loss masking:
+
+```bash
+# Run SFT conversational training on macOS MPS or GPU
+source .venv/bin/activate && python -m train.sft --config configs/mlx_config.yaml --max-steps 1000 --learning-rate 2e-5
+```
+
+### Turn Format & Loss Masking
+Conversations are tokenized as:
+```text
+<bos><start_of_turn>user\nBonjour, comment t'appelles-tu ?<end_of_turn>\n<start_of_turn>model\nBonjour, je suis FrenchGemma, un LLM entraîné en français.<end_of_turn>\n
+```
+Prompt tokens (user and system turns) are automatically assigned a label of `-100`, ensuring cross-entropy optimization gradients are computed strictly over the model response tokens.
+
+---
+
+## Direct Preference Optimization (DPO) (`python -m train.dpo`)
+
+Align French Gemma models with human preferences using Direct Preference Optimization (DPO):
+
+```bash
+# Run DPO alignment with beta=0.1
+source .venv/bin/activate && python -m train.dpo --config configs/mlx_config.yaml --dpo-beta 0.1 --max-steps 500 --learning-rate 5e-6
+```
+
+### DPO Loss & Reward Metrics
+DPO optimizes the policy $\pi_\theta$ against a frozen reference model $\pi_{\text{ref}}$:
+$$\mathcal{L}_{\text{DPO}}(\pi_\theta; \pi_{\text{ref}}) = -\mathbb{E}_{(x, y_w, y_l)}\left[\log \sigma\left(\beta \log \frac{\pi_\theta(y_w|x)}{\pi_{\text{ref}}(y_w|x)} - \beta \log \frac{\pi_\theta(y_l|x)}{\pi_{\text{ref}}(y_l|x)}\right)\right]$$
+During training, the trainer monitors `reward_accuracy` and `reward_margin` metrics to track alignment progress.
 
 ---
 

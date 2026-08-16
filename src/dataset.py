@@ -163,7 +163,7 @@ class PackedTextDataset(Dataset[Dict[str, Any]]):
 
 GEMMA_CHAT_TEMPLATE = (
     "{{ bos_token }}"
-    "{% if messages[0]['role'] == 'system' %}"
+    "{% if messages and messages[0]['role'] == 'system' %}"
     "{% set loop_messages = messages[1:] %}"
     "{% set system_message = messages[0]['content'] %}"
     "{% else %}"

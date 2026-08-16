@@ -58,14 +58,19 @@ DEFAULT_FRENCH_CONVERSATIONS = [
 
 def load_sft_conversations(data_path: Optional[str] = None) -> List[Any]:
     """Loads SFT conversations from JSON/JSONL file or returns default French dialogue corpus."""
-    if data_path and os.path.exists(data_path):
+    if data_path is not None:
+        if not os.path.exists(data_path):
+            raise FileNotFoundError(f"SFT dataset file not found: {data_path}")
         logger.info(f"Loading SFT conversation data from {data_path}...")
         conversations: List[Any] = []
         if data_path.endswith(".jsonl"):
             with open(data_path, "r", encoding="utf-8") as f:
-                for line in f:
+                for idx, line in enumerate(f, start=1):
                     if line.strip():
-                        conversations.append(json.loads(line.strip()))
+                        try:
+                            conversations.append(json.loads(line.strip()))
+                        except json.JSONDecodeError as err:
+                            raise ValueError(f"Malformed JSONL at {data_path}:{idx}: {err}") from err
         else:
             with open(data_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -73,6 +78,8 @@ def load_sft_conversations(data_path: Optional[str] = None) -> List[Any]:
                     conversations = data
                 elif isinstance(data, dict) and "data" in data:
                     conversations = data["data"]
+        if not conversations:
+            raise ValueError(f"No conversation samples loaded from {data_path}")
         return conversations
 
     logger.info("Using default French conversational fine-tuning dataset.")
@@ -113,7 +120,12 @@ def main() -> None:
             save_dir=tokenizer_dir,
         )
 
-    conversations = load_sft_conversations()
+    sft_data_path = (
+        config.dataset_path
+        if config.dataset_path and config.dataset_path != "wikimedia/wikipedia"
+        else None
+    )
+    conversations = load_sft_conversations(sft_data_path)
     sft_dataset = SFTDataset(
         conversations=conversations,
         tokenizer=tokenizer,

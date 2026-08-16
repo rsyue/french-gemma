@@ -23,12 +23,15 @@ Welcome, agent! This document contains critical guidelines, architecture pattern
 ---
 
 ## 2. Core Repository Architecture
-*   **`src/config.py`**: Custom config loader/validator from YAML (`TrainingConfig`), including multi-dataset mixes (`DatasetMixEntry`, `parse_data_mix_config`) and distributed parameters like `dist_timeout_seconds`.
-*   **`src/dataset.py`**: Custom tokenizer training (`ByteLevelBPETokenizer`), multi-dataset proportional loading and mixing (`load_dataset_mix`), flat token packing with a sliding window stride of 50 tokens, atomic cache generation with `.ready` sentinels, rank synchronization helpers (`is_data_prepared`, `wait_for_data_prep`), and `DataLoader` creation. Uses **right padding** (`padding_side = "right"`) for causal decoder training. Supports optional pre-computed chunk injection and custom samplers (e.g. `DistributedSampler`).
+*   **`src/config.py`**: Custom config loader/validator from YAML (`TrainingConfig`), including multi-dataset mixes (`DatasetMixEntry`, `parse_data_mix_config`), DPO parameters (`dpo_beta`, `dpo_label_smoothing`), and distributed parameters like `dist_timeout_seconds`.
+*   **`src/dataset.py`**: Custom tokenizer training (`ByteLevelBPETokenizer`) with Gemma 3 turn tokens (`<start_of_turn>`, `<end_of_turn>`) and Jinja chat template, multi-dataset proportional loading and mixing (`load_dataset_mix`), flat token packing with sliding window, atomic cache generation with `.ready` sentinels, and `DataLoader` creation.
+*   **`src/sft_dataset.py`**: Turn-based conversational dataset (`SFTDataset`), collation, and prompt loss masking (`labels = -100` on user/system prompt tokens) for supervised fine-tuning.
+*   **`src/dpo_dataset.py`**: Preference dataset (`DPODataset`), collation, and token log-probability extractor (`get_batch_logps`) for Direct Preference Optimization.
 *   **`src/model.py`**: Wraps the base `Gemma3` model initialized from a blank configuration, adding a PyTorch-native `nn.Linear` LM Head. Incorporates **Gaussian embedding noise** (regulated by `embedding_noise_std`) during training.
 *   **`src/scheduler.py`**: Handles linear warmup + cosine annealing with warm restarts, and `FreezeManager` layer freezing schedules.
 *   **`src/trainer.py`**: Pretraining trainer loop driving optimization, evaluation metrics (loss & perplexity), text generation, and TensorBoard logging. Retains the **top 3 best checkpoints** based on perplexity and training loss. Implements process-rank checks (`self.is_main_process`) and validation loss all-reduce for DDP synchronization.
-*   **`train/pretrain.py` & `scripts/run_ddp.sh`**: Configurable, distributed-ready pretraining launcher and strategy supporting single-GPU/MPS runs and multi-GPU DDP training. Defers `dist.init_process_group` until after rank-0 data preparation using sentinel synchronization to avoid NCCL watchdog timeouts.
+*   **`train/strategies/`**: Pluggable training strategy hierarchy including `PretrainStrategy` (causal LM loss), `SFTStrategy` (prompt-masked cross-entropy), and `DPOStrategy` (reference-model log-ratio preference loss).
+*   **`train/pretrain.py`, `train/sft.py`, `train/dpo.py` & `scripts/run_ddp.sh`**: Configurable training entrypoints for pretraining, supervised fine-tuning, and direct preference alignment.
 *   **`inference.py`**: Interactive CLI chat interface and text streamer supporting configurable sampling parameters (`do_sample`, `temperature`, `top_p`, `top_k`, `repetition_penalty`).
 
 ---

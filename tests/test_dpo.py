@@ -155,3 +155,57 @@ def test_dpo_strategy_loss_computation():
 def test_training_factory_builds_dpo_strategy():
     strategy = TrainingFactory.build_strategy("dpo")
     assert isinstance(strategy, DPOStrategy)
+
+
+def test_dpo_strategy_label_smoothing():
+    class DummyModel(nn.Module):
+        def forward(self, input_ids, attention_mask=None, **kwargs):
+            bs, seq_len = input_ids.shape
+            logits = torch.randn(bs, seq_len, 10)
+            class Out:
+                pass
+            out = Out()
+            out.logits = logits
+            return out
+
+    model = DummyModel()
+    strategy = DPOStrategy(ref_model=None, beta=0.1, label_smoothing=0.1)
+
+    batch = {
+        "chosen_input_ids": torch.tensor([[1, 2, 3]]),
+        "chosen_labels": torch.tensor([[-100, 2, 3]]),
+        "chosen_attention_mask": torch.tensor([[1, 1, 1]]),
+        "rejected_input_ids": torch.tensor([[1, 4, 5]]),
+        "rejected_labels": torch.tensor([[-100, 4, 5]]),
+        "rejected_attention_mask": torch.tensor([[1, 1, 1]]),
+    }
+
+    loss = strategy.compute_loss(model, batch)
+    assert isinstance(loss, torch.Tensor)
+    assert loss.item() >= 0.0
+
+
+def test_load_dpo_pairs_file_handling(tmp_path):
+    import json
+
+    from train.dpo import load_dpo_pairs
+
+    # Non-existent file raises FileNotFoundError
+    with pytest.raises(FileNotFoundError):
+        load_dpo_pairs(str(tmp_path / "non_existent.jsonl"))
+
+    # Valid JSON file
+    json_path = tmp_path / "dpo.json"
+    data = [
+        {
+            "prompt": "Test prompt",
+            "chosen": "Test chosen",
+            "rejected": "Test rejected",
+        }
+    ]
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+
+    loaded = load_dpo_pairs(str(json_path))
+    assert len(loaded) == 1
+    assert loaded[0]["prompt"] == "Test prompt"

@@ -19,23 +19,33 @@ logger = logging.getLogger(__name__)
 def normalize_conversation(raw_item: Union[List[Dict[str, str]], Dict[str, Any]]) -> List[Dict[str, str]]:
     """
     Normalizes different dialogue data formats into standard messages list:
-    [{"role": "user", "content": "..."}, {"role": "model", "content": "..."}]
+    [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
     """
     if isinstance(raw_item, list):
-        return raw_item
+        messages: List[Dict[str, str]] = []
+        for turn in raw_item:
+            if isinstance(turn, dict):
+                if "from" in turn and "value" in turn:
+                    role = "user" if turn["from"] in ("human", "user") else "assistant"
+                    messages.append({"role": role, "content": str(turn["value"])})
+                elif "role" in turn and "content" in turn:
+                    messages.append({"role": str(turn["role"]), "content": str(turn["content"])})
+        return messages
     if isinstance(raw_item, dict):
         if "messages" in raw_item and isinstance(raw_item["messages"], list):
-            return raw_item["messages"]
+            return normalize_conversation(raw_item["messages"])
         if "conversations" in raw_item and isinstance(raw_item["conversations"], list):
-            return raw_item["conversations"]
+            return normalize_conversation(raw_item["conversations"])
         if "instruction" in raw_item and "response" in raw_item:
-            messages = [{"role": "user", "content": str(raw_item["instruction"])}]
-            messages.append({"role": "model", "content": str(raw_item["response"])})
-            return messages
+            return [
+                {"role": "user", "content": str(raw_item["instruction"])},
+                {"role": "assistant", "content": str(raw_item["response"])},
+            ]
         if "prompt" in raw_item and "response" in raw_item:
-            messages = [{"role": "user", "content": str(raw_item["prompt"])}]
-            messages.append({"role": "model", "content": str(raw_item["response"])})
-            return messages
+            return [
+                {"role": "user", "content": str(raw_item["prompt"])},
+                {"role": "assistant", "content": str(raw_item["response"])},
+            ]
     raise ValueError(f"Unsupported conversation record format: {type(raw_item).__name__}")
 
 
