@@ -92,65 +92,71 @@ class FrenchGemmaModel(nn.Module):
     def compare_and_load_automodel(
         self,
         checkpoint_state_dict: Dict[str, torch.Tensor],
-        strict: bool = False,
+        strict: bool = True,
     ) -> Dict[str, Any]:
         """
-        Extracts and compares HuggingFace base model weights individually as an AutoModel,
-        handling vocabulary slicing for embed_tokens without shape mismatch errors.
+        Extracts and compares base model weights individually as an AutoModel.
+        Strictly verifies that hidden dimensions, module layers, and tensor shapes match
+        the expected architecture, raising ValueError if any layer mismatch is detected.
         """
         automodel_target = self.model.state_dict()
         automodel_keys = set(automodel_target.keys())
 
         automodel_sub_dict: Dict[str, torch.Tensor] = {}
         matched_keys: List[str] = []
-        mismatched_keys: List[str] = []
 
         for raw_k, v in checkpoint_state_dict.items():
-            k = raw_k
-            if k.startswith("model."):
-                k = k[len("model.") :]
+            k = raw_k[len("model.") :] if raw_k.startswith("model.") else raw_k
 
             if k in automodel_keys:
                 target_shape = automodel_target[k].shape
-                if k == "embed_tokens.weight":
-                    if v.shape == target_shape:
-                        automodel_sub_dict[k] = v
-                        matched_keys.append(k)
-                    else:
-                        logger.warning(
-                            f"Vocabulary size difference in embed_tokens.weight: "
-                            f"checkpoint={v.shape[0]}, model={target_shape[0]}. Copying overlapping tokens."
+                if v.shape != target_shape:
+                    if k == "embed_tokens.weight":
+                        raise ValueError(
+                            f"Vocabulary / embedding dimension mismatch for AutoModel 'embed_tokens.weight': "
+                            f"checkpoint has shape {v.shape} (vocab_size={v.shape[0]}, hidden_dim={v.shape[1]}), "
+                            f"but model expects {target_shape} (vocab_size={target_shape[0]}, "
+                            f"hidden_dim={target_shape[1]}). Ensure that post-training uses the exact "
+                            f"tokenizer and model configuration from pretraining."
                         )
-                        min_v = min(v.shape[0], target_shape[0])
-                        self.model.embed_tokens.weight.data[:min_v].copy_(v[:min_v])
-                        matched_keys.append(f"{k} (partial {min_v}/{target_shape[0]})")
-                else:
-                    if v.shape == target_shape:
-                        automodel_sub_dict[k] = v
-                        matched_keys.append(k)
-                    else:
-                        logger.warning(
-                            f"AutoModel parameter shape mismatch for '{k}': "
-                            f"checkpoint has {v.shape}, model has {target_shape}. Skipping."
-                        )
-                        mismatched_keys.append(k)
+                    raise ValueError(
+                        f"Architecture layer size / hidden dimension mismatch for AutoModel module '{k}': "
+                        f"checkpoint has shape {v.shape}, but model expects {target_shape} "
+                        f"(expected hidden_dim={self.config.hidden_size})."
+                    )
+                automodel_sub_dict[k] = v
+                matched_keys.append(k)
+
+        missing_keys = [k for k in automodel_keys if k not in automodel_sub_dict]
+        if missing_keys and strict:
+            raise ValueError(
+                f"Checkpoint is missing {len(missing_keys)} required AutoModel module parameters "
+                f"(first missing: '{missing_keys[0]}'). "
+                f"Ensure the checkpoint was saved from a compatible base model ({self.model_id})."
+            )
 
         load_res = self.model.load_state_dict(automodel_sub_dict, strict=strict)
         logger.info(
-            f"AutoModel comparison complete: {len(matched_keys)} matched, "
-            f"{len(mismatched_keys)} mismatched, {len(load_res.missing_keys)} missing."
+            f"AutoModel comparison verified successfully: {len(matched_keys)} module parameters matched."
         )
         return {
             "matched_keys": matched_keys,
-            "mismatched_keys": mismatched_keys,
             "missing_keys": load_res.missing_keys,
         }
 
-    def load_pretrained_checkpoint(self, checkpoint_path: str, strict: bool = False) -> None:
+    def load_pretrained_checkpoint(
+        self,
+        checkpoint_path: str,
+        strict: bool = True,
+    ) -> None:
         """
-        Loads weights from a local checkpoint directory or file into this model instance.
-        Compares the HuggingFace base model individually as an AutoModel,
-        and aligns the final linear LM head.
+        Loads an existing model checkpoint saved locally from pretraining.
+        
+        Performs strict post-training compatibility checks:
+        1. Compares the base HuggingFace model individually as an AutoModel, ensuring
+           hidden dimensions and number of modules match exactly.
+        2. Ensures the checkpoint's final linear layer (lm_head) and embeddings dimension
+           strictly correspond to the tokenizer vocabulary size.
         """
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Pretrained checkpoint not found: {checkpoint_path}")
@@ -175,7 +181,7 @@ class FrenchGemmaModel(nn.Module):
         else:
             weights_file = checkpoint_path
 
-        logger.info(f"Loading pretrained model weights from: {weights_file}")
+        logger.info(f"Loading and validating pretrained model weights from: {weights_file}")
         state_dict: Any
         if weights_file.endswith(".safetensors"):
             try:
@@ -209,20 +215,31 @@ class FrenchGemmaModel(nn.Module):
                     clean_k = clean_k[len("_orig_mod.") :]
             cleaned_state_dict[clean_k] = v
 
-        # 1. Compare and load HuggingFace checkpoint individually as an AutoModel
-        self.compare_and_load_automodel(cleaned_state_dict, strict=False)
+        # 1. Compare and load base AutoModel individually with strict dimension checks
+        self.compare_and_load_automodel(cleaned_state_dict, strict=strict)
 
-        # 2. Ensure final linear layer (self.lm_head) alignment
-        if getattr(self.config, "tie_word_embeddings", True):
+        # 2. Check final linear layer (self.lm_head) and ensure dimensions match tokenizer vocab
+        expected_vocab_size = self.config.vocab_size
+        if "lm_head.weight" in cleaned_state_dict:
+            ckpt_head = cleaned_state_dict["lm_head.weight"]
+            if ckpt_head.shape[0] != expected_vocab_size:
+                raise ValueError(
+                    f"Final linear layer (lm_head) vocabulary mismatch: "
+                    f"checkpoint has output dimension {ckpt_head.shape[0]}, "
+                    f"but tokenizer length is {expected_vocab_size}."
+                )
+            if ckpt_head.shape[1] != self.config.hidden_size:
+                raise ValueError(
+                    f"Final linear layer (lm_head) hidden dimension mismatch: "
+                    f"checkpoint has hidden_dim {ckpt_head.shape[1]}, "
+                    f"but model expects {self.config.hidden_size}."
+                )
+            if not getattr(self.config, "tie_word_embeddings", True):
+                self.lm_head.load_state_dict({"weight": ckpt_head})
+            else:
+                self.lm_head.weight = self.model.embed_tokens.weight
+        elif getattr(self.config, "tie_word_embeddings", True):
             self.lm_head.weight = self.model.embed_tokens.weight
-        else:
-            if "lm_head.weight" in cleaned_state_dict:
-                ckpt_head = cleaned_state_dict["lm_head.weight"]
-                if ckpt_head.shape == self.lm_head.weight.shape:
-                    self.lm_head.weight.data.copy_(ckpt_head)
-                else:
-                    min_v = min(ckpt_head.shape[0], self.lm_head.weight.shape[0])
-                    self.lm_head.weight.data[:min_v].copy_(ckpt_head[:min_v])
 
     def get_input_embeddings(self) -> nn.Module:
         return self.model.embed_tokens  # type: ignore[no-any-return]

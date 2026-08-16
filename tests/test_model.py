@@ -5,6 +5,9 @@ This module contains unit tests validating base model wraps, LM Head projections
 embedding noise injection, layer freezing scheduler steps, and cosine annealing schedules.
 """
 
+import os
+
+import pytest
 import torch
 
 from src.model import FrenchGemmaModel
@@ -163,9 +166,7 @@ def test_ensure_tokenizer_vocab_alignment():
         assert model.lm_head.weight is model.model.embed_tokens.weight
 
 
-def test_compare_and_load_automodel_with_vocab_mismatch(tmp_path):
-    import os
-
+def test_compare_and_load_automodel_raises_on_vocab_mismatch(tmp_path):
     # Create source model with vocab_size 500
     src_model = FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=500)
     ckpt_dir = str(tmp_path / "ckpt_500")
@@ -175,16 +176,33 @@ def test_compare_and_load_automodel_with_vocab_mismatch(tmp_path):
 
     # Destination model with vocab_size 250 (e.g. SFT tokenizer length)
     dst_model = FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=250)
-    # Should successfully load without size mismatch exception
-    dst_model.load_pretrained_checkpoint(ckpt_dir)
 
-    assert dst_model.lm_head.out_features == 250
-    assert dst_model.model.embed_tokens.num_embeddings == 250
-    # Overlapping 250 tokens should match exactly
-    assert torch.allclose(
-        dst_model.model.embed_tokens.weight[:250],
-        src_model.model.embed_tokens.weight[:250],
-    )
+    # Must raise ValueError due to vocabulary size mismatch between checkpoint and tokenizer
+    with pytest.raises(ValueError, match="Vocabulary / embedding dimension mismatch"):
+        dst_model.load_pretrained_checkpoint(ckpt_dir)
+
+
+def test_compare_and_load_automodel_raises_on_layer_shape_mismatch():
+    model = FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=250)
+
+    # Corrupt a layer's tensor shape in checkpoint state dict
+    fake_state_dict = model.state_dict()
+    fake_state_dict["model.norm.weight"] = torch.randn(10)  # Incorrect shape
+
+    with pytest.raises(ValueError, match="Architecture layer size / hidden dimension mismatch"):
+        model.compare_and_load_automodel(fake_state_dict)
+
+
+def test_load_matching_checkpoint_succeeds(tmp_path):
+    src_model = FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=250)
+    ckpt_file = str(tmp_path / "matching_model.pt")
+    torch.save(src_model.state_dict(), ckpt_file)
+
+    dst_model = FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=250)
+    dst_model.load_pretrained_checkpoint(ckpt_file)
+
+    for p1, p2 in zip(src_model.parameters(), dst_model.parameters()):
+        assert torch.allclose(p1, p2)
 
 
 def test_load_hf_automodel_checkpoint_format(tmp_path):
