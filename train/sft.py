@@ -37,6 +37,7 @@ def initialize_sft_model(config: TrainingConfig, vocab_size: int) -> FrenchGemma
     Initializes the French Gemma model for SFT.
     If config.pretrained_model_path is set and exists, loads the local pretrained checkpoint.
     Otherwise, logs a warning and defaults to the base Gemma 3 checkpoint from HuggingFace.
+    Ensures that the tokenizer length corresponds to the size of the final linear layer.
     """
     model = FrenchGemmaModel(
         model_id=config.model_id,
@@ -56,6 +57,9 @@ def initialize_sft_model(config: TrainingConfig, vocab_size: int) -> FrenchGemma
             "No local pretrained checkpoint provided via --pretrained-model-path. "
             f"Defaulting to base Gemma 3 checkpoint from HuggingFace: '{config.model_id}'."
         )
+
+    # Ensure length of tokenizer corresponds to final linear layer and embedding dimensions
+    model.ensure_tokenizer_vocab_alignment(vocab_size)
     return model
 
 

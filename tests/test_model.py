@@ -147,3 +147,57 @@ def test_embedding_noise():
         out5 = model_no_noise(input_ids)
         out6 = model_no_noise(input_ids)
     assert torch.allclose(out5.logits, out6.logits, atol=1e-5)
+
+
+def test_ensure_tokenizer_vocab_alignment():
+    model = FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=200)
+    assert model.lm_head.out_features == 200
+    assert model.model.embed_tokens.num_embeddings == 200
+
+    # Align with new tokenizer length
+    model.ensure_tokenizer_vocab_alignment(350)
+    assert model.lm_head.out_features == 350
+    assert model.model.embed_tokens.num_embeddings == 350
+    assert model.config.vocab_size == 350
+    if model.config.tie_word_embeddings:
+        assert model.lm_head.weight is model.model.embed_tokens.weight
+
+
+def test_compare_and_load_automodel_with_vocab_mismatch(tmp_path):
+    import os
+
+    # Create source model with vocab_size 500
+    src_model = FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=500)
+    ckpt_dir = str(tmp_path / "ckpt_500")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    weights_path = os.path.join(ckpt_dir, "pytorch_model.bin")
+    torch.save(src_model.state_dict(), weights_path)
+
+    # Destination model with vocab_size 250 (e.g. SFT tokenizer length)
+    dst_model = FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=250)
+    # Should successfully load without size mismatch exception
+    dst_model.load_pretrained_checkpoint(ckpt_dir)
+
+    assert dst_model.lm_head.out_features == 250
+    assert dst_model.model.embed_tokens.num_embeddings == 250
+    # Overlapping 250 tokens should match exactly
+    assert torch.allclose(
+        dst_model.model.embed_tokens.weight[:250],
+        src_model.model.embed_tokens.weight[:250],
+    )
+
+
+def test_load_hf_automodel_checkpoint_format(tmp_path):
+    # Simulating a HuggingFace checkpoint where state_dict has keys directly for AutoModel (no model. prefix)
+    src_model = FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=300)
+    hf_automodel_state = src_model.model.state_dict()
+
+    ckpt_file = str(tmp_path / "hf_model.pt")
+    torch.save(hf_automodel_state, ckpt_file)
+
+    dst_model = FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=300)
+    dst_model.load_pretrained_checkpoint(ckpt_file)
+
+    for k in hf_automodel_state.keys():
+        assert torch.allclose(dst_model.model.state_dict()[k], hf_automodel_state[k])
+

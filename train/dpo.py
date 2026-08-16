@@ -141,14 +141,18 @@ def main() -> None:
         model_id=config.model_id,
         vocab_size=len(tokenizer),
         embedding_noise_std=0.0,
-    ).to(config.device)
+    )
+    policy_model.ensure_tokenizer_vocab_alignment(tokenizer)
+    policy_model = policy_model.to(config.device)
 
     logger.info("Initializing Frozen Reference Model for DPO...")
     ref_model = FrenchGemmaModel(
         model_id=config.model_id,
         vocab_size=len(tokenizer),
         embedding_noise_std=0.0,
-    ).to(config.device)
+    )
+    ref_model.ensure_tokenizer_vocab_alignment(tokenizer)
+    ref_model = ref_model.to(config.device)
     ref_model.load_state_dict(policy_model.state_dict())
     ref_model.eval()
     for param in ref_model.parameters():
