@@ -447,8 +447,6 @@ class Pretrainer:
         the new checkpoint is written first, and the worst checkpoint is then safely removed.
         """
         if not self.is_main_process:
-            if torch.distributed.is_available() and torch.distributed.is_initialized():
-                torch.distributed.barrier()
             return False
 
         if self.max_checkpoints <= 0:
@@ -495,17 +493,19 @@ class Pretrainer:
                         logger.warning(f"Failed to delete worst checkpoint {worst_path}: {e}")
                 self.best_checkpoints.remove(worst_to_delete)
 
-            if torch.distributed.is_available() and torch.distributed.is_initialized():
-                torch.distributed.barrier()
             return True
         else:
             logger.info(
                 f"No improvement in {metric_name} (current: {metric:.4f}). "
                 f"Leaving top {len(self.best_checkpoints)} checkpoints in place."
             )
-            if torch.distributed.is_available() and torch.distributed.is_initialized():
-                torch.distributed.barrier()
             return False
+
+    def save_best_perplexity_checkpoint(self, global_step: int, perplexity: float) -> None:
+        self.save_best_checkpoint(global_step, perplexity, metric_name="ppl")
+
+    def save_best_loss_checkpoint(self, global_step: int, train_loss: float) -> None:
+        self.save_best_checkpoint(global_step, train_loss, metric_name="loss")
 
     def save_checkpoint(self, global_step: int, perplexity: float = float("inf")) -> None:
         """
