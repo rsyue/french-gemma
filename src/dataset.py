@@ -16,7 +16,7 @@ import torch
 from datasets import load_dataset
 from tokenizers import ByteLevelBPETokenizer
 from torch.utils.data import DataLoader, Dataset
-from transformers import DataCollatorForLanguageModeling, PreTrainedTokenizerFast
+from transformers import AutoTokenizer, DataCollatorForLanguageModeling, PreTrainedTokenizerFast
 
 from src.config import DatasetMixEntry
 
@@ -236,6 +236,37 @@ def train_custom_tokenizer(
     t_train = time.time() - t0
     logger.info(f"Tokenizer training completed in {t_train:.2f} seconds. Saved to {save_dir}")
     return hf_tokenizer
+
+
+def load_tokenizer_for_post_training(
+    model_id: str,
+    data_cache_dir: Optional[str] = None,
+    pretrained_model_path: Optional[str] = None,
+) -> Any:
+    """
+    Loads an existing tokenizer for post-training (SFT, DPO, RL).
+    Tokenizer training is strictly reserved for pretraining.
+    Looks for existing tokenizer in:
+      1. pretrained_model_path (if provided and contains tokenizer files)
+      2. data_cache_dir/tokenizer_checkpoint (pretraining cache)
+      3. model_id (base model)
+    """
+    if pretrained_model_path and os.path.exists(pretrained_model_path):
+        if os.path.exists(os.path.join(pretrained_model_path, "tokenizer.json")):
+            logger.info(f"Loading existing tokenizer from pretrained checkpoint: {pretrained_model_path}")
+            return AutoTokenizer.from_pretrained(pretrained_model_path)
+
+    if data_cache_dir:
+        tokenizer_dir = os.path.join(data_cache_dir, "tokenizer_checkpoint")
+        if os.path.exists(os.path.join(tokenizer_dir, "tokenizer.json")):
+            logger.info(f"Loading existing tokenizer from pretraining cache: {tokenizer_dir}")
+            return AutoTokenizer.from_pretrained(tokenizer_dir)
+
+    logger.info(f"Loading existing tokenizer as-is from base model ID: {model_id}")
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token or "<pad>"
+    return tokenizer
 
 
 def load_french_dataset(

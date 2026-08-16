@@ -14,10 +14,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import torch
-from transformers import AutoTokenizer
 
 from src.config import TrainingConfig
-from src.dataset import train_custom_tokenizer
+from src.dataset import load_tokenizer_for_post_training
 from src.dpo_dataset import DPODataset, get_dpo_dataloader
 from src.model import FrenchGemmaModel
 from src.scheduler import get_cosine_warmup_scheduler
@@ -98,22 +97,11 @@ def main() -> None:
         f"Device: {config.device} | Max Seq Len: {config.max_sequence_length}"
     )
 
-    tokenizer_dir = os.path.join(config.data_cache_dir, "tokenizer_checkpoint")
-    if os.path.exists(os.path.join(tokenizer_dir, "tokenizer.json")):
-        logger.info(f"Loading existing tokenizer from {tokenizer_dir}")
-        tokenizer: Any = AutoTokenizer.from_pretrained(tokenizer_dir)
-    else:
-        logger.info("Training initial tokenizer with Gemma 3 turn tokens...")
-        seed_texts = [
-            "<start_of_turn>user\nBonjour, comment t'appelles-tu ?<end_of_turn>\n"
-            "<start_of_turn>model\nBonjour, je suis FrenchGemma, un LLM entraîné en français.<end_of_turn>\n",
-            "Texte d'entraînement français pour initialisation du tokenizer.",
-        ]
-        tokenizer = train_custom_tokenizer(
-            seed_texts,
-            vocab_size=config.vocab_size,
-            save_dir=tokenizer_dir,
-        )
+    tokenizer: Any = load_tokenizer_for_post_training(
+        model_id=config.model_id,
+        data_cache_dir=config.data_cache_dir,
+        pretrained_model_path=config.pretrained_model_path,
+    )
 
     dpo_data_path = (
         config.dataset_path
