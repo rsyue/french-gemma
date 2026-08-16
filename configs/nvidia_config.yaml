@@ -23,3 +23,4 @@ vocab_size: 25000
 num_examples: "all"
 packing_batch_size: 1000
 dist_timeout_seconds: 7200
+save_dir: "./checkpoints/pretrain"

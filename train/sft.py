@@ -88,7 +88,7 @@ def load_sft_conversations(data_path: Optional[str] = None) -> List[Any]:
 
 def main() -> None:
     """Main CLI entrypoint for French Gemma 3 Supervised Fine-Tuning."""
-    config: TrainingConfig = parse_args_to_config()
+    config: TrainingConfig = parse_args_to_config(modality="sft")
 
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision("high")

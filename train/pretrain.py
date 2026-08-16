@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 def main() -> None:
     """Main CLI entrypoint for French Gemma 3 pretraining."""
-    config = parse_args_to_config()
+    config = parse_args_to_config(modality="pretrain")
 
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision("high")

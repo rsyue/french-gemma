@@ -85,6 +85,28 @@ def test_specific_repo_configs():
     assert amd_cfg.max_steps == 25
     assert amd_cfg.warmup_steps == 1
     assert amd_cfg.seed == 42
+    assert amd_cfg.save_dir == "./checkpoints/pretrain"
+
+    sft_cfg = TrainingConfig.from_yaml(os.path.join(config_dir, "sft_config.yaml"))
+    assert sft_cfg.max_sequence_length == 4096
+    assert sft_cfg.save_dir == "./checkpoints/sft"
+    assert sft_cfg.output_dir == "./checkpoints/sft"
+
+    dpo_cfg = TrainingConfig.from_yaml(os.path.join(config_dir, "dpo_config.yaml"))
+    assert dpo_cfg.max_sequence_length == 4096
+    assert dpo_cfg.save_dir == "./checkpoints/dpo"
+    assert dpo_cfg.output_dir == "./checkpoints/dpo"
+    assert dpo_cfg.dpo_beta == 0.1
+
+
+def test_config_save_dir_synchronization():
+    cfg1 = TrainingConfig(save_dir="./custom_save")
+    assert cfg1.output_dir == "./custom_save"
+    assert cfg1.save_dir == "./custom_save"
+
+    cfg2 = TrainingConfig(output_dir="./custom_out")
+    assert cfg2.output_dir == "./custom_out"
+    assert cfg2.save_dir == "./custom_out"
 
 
 

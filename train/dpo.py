@@ -81,7 +81,7 @@ def load_dpo_pairs(data_path: Optional[str] = None) -> List[Any]:
 
 def main() -> None:
     """Main CLI entrypoint for French Gemma 3 Direct Preference Optimization."""
-    config: TrainingConfig = parse_args_to_config()
+    config: TrainingConfig = parse_args_to_config(modality="dpo")
 
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision("high")

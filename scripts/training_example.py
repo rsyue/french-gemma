@@ -35,7 +35,7 @@ parse_and_load_config = parse_args_to_config
 
 
 def main() -> None:
-    config = parse_args_to_config()
+    config = parse_args_to_config(modality="pretrain")
 
     # Default to 100 examples for quick smoke testing if num_examples was not explicitly passed via CLI
     cli_num_ex_passed = any(

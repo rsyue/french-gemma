@@ -133,6 +133,13 @@ class TrainingConfig:
     dpo_beta: float = 0.1
     dpo_label_smoothing: float = 0.0
     ref_model_id: Optional[str] = None
+    save_dir: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.save_dir is not None:
+            self.output_dir = self.save_dir
+        else:
+            self.save_dir = self.output_dir
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "TrainingConfig":
@@ -143,6 +150,11 @@ class TrainingConfig:
 
         if not data or not isinstance(data, dict):
             data = {}
+
+        if "save_dir" in data and ("output_dir" not in data or data["output_dir"] is None):
+            data["output_dir"] = data["save_dir"]
+        elif "output_dir" in data and ("save_dir" not in data or data["save_dir"] is None):
+            data["save_dir"] = data["output_dir"]
 
         if "freeze_schedule" in data and data["freeze_schedule"] is not None:
             data["freeze_schedule"] = {int(k): list(v) for k, v in data["freeze_schedule"].items()}
