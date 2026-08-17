@@ -103,6 +103,37 @@ def test_format_messages_with_prompt_mask(mock_tokenizer):
         assert labels[k] == -100
 
 
+def test_batch_format_messages_with_prompt_mask_parity(mock_tokenizer):
+    from src.sft_dataset import batch_format_messages_with_prompt_mask
+
+    convs = [
+        [
+            {"role": "system", "content": "Système d'assistance."},
+            {"role": "user", "content": "Bonjour"},
+            {"role": "model", "content": "Bonjour !"},
+        ],
+        [
+            {"role": "user", "content": "Quelle est la capitale de la France ?"},
+            {"role": "model", "content": "Paris."},
+            {"role": "user", "content": "Merci !"},
+            {"role": "model", "content": "De rien !"},
+        ],
+    ]
+
+    batched = batch_format_messages_with_prompt_mask(convs, mock_tokenizer, max_seq_len=64)
+    assert len(batched) == 2
+
+    for i, msgs in enumerate(convs):
+        single_ids, single_labels = format_messages_with_prompt_mask(
+            messages=msgs,
+            tokenizer=mock_tokenizer,
+            max_seq_len=64,
+            pad_to_max=False,
+        )
+        assert batched[i][0] == single_ids
+        assert batched[i][1] == single_labels
+
+
 def test_sft_dataset_and_collator(mock_tokenizer):
     conversations = [
         [
@@ -294,3 +325,245 @@ def test_sft_checkpoint_rotation_logic(tmp_path):
     files = os.listdir(output_dir)
     assert not any("loss_2.5000" in f for f in files)
     assert any("loss_1.2000" in f for f in files)
+
+
+def test_normalize_conversation_all_formats():
+    from src.sft_dataset import normalize_conversation
+
+    # 1. Luciole format (messages list)
+    luciole_item = {
+        "messages": [
+            {"role": "user", "content": "Quelle est la vitesse de la lumière ?"},
+            {"role": "assistant", "content": "Environ 300 000 km/s dans le vide."},
+        ]
+    }
+    norm1 = normalize_conversation(luciole_item)
+    assert len(norm1) == 2
+    assert norm1[0]["role"] == "user"
+    assert norm1[1]["content"] == "Environ 300 000 km/s dans le vide."
+
+    # 2. Comparia format (prompt + winner / responses)
+    comparia_item_a = {
+        "prompt": "Explique la photosynthèse.",
+        "response_a": "C'est la production d'énergie par les plantes via la lumière.",
+        "response_b": "Les plantes absorbent l'eau.",
+        "winner": "model_a",
+    }
+    norm2 = normalize_conversation(comparia_item_a)
+    assert len(norm2) == 2
+    assert norm2[0]["role"] == "user"
+    assert norm2[1]["content"] == "C'est la production d'énergie par les plantes via la lumière."
+
+    comparia_item_b = {
+        "prompt": "Qui a peint la Joconde ?",
+        "response_a": "Michel-Ange",
+        "response_b": "Léonard de Vinci",
+        "winner": "model_b",
+    }
+    norm2_b = normalize_conversation(comparia_item_b)
+    assert norm2_b[1]["content"] == "Léonard de Vinci"
+
+    # 3. FQuAD format (context + question + answers)
+    fquad_item = {
+        "context": "Paris est la capitale et la plus grande ville de France.",
+        "question": "Quelle est la capitale de la France ?",
+        "answers": {"text": ["Paris"], "answer_start": [0]},
+    }
+    norm3 = normalize_conversation(fquad_item)
+    assert len(norm3) == 2
+    assert "Contexte:\nParis est la capitale" in norm3[0]["content"]
+    assert "Question:\nQuelle est la capitale" in norm3[0]["content"]
+    assert norm3[1]["content"] == "Paris"
+
+
+def test_load_pretrained_checkpoint_in_model(tmp_path):
+    import os
+
+    from src.model import FrenchGemmaModel
+
+    model_id = "google/gemma-3-270m-it"
+    vocab_size = 256
+
+    model_src = FrenchGemmaModel(model_id=model_id, vocab_size=vocab_size)
+    ckpt_dir = str(tmp_path / "pretrained_ckpt")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    weights_path = os.path.join(ckpt_dir, "pytorch_model.bin")
+    torch.save(model_src.state_dict(), weights_path)
+
+    model_dst = FrenchGemmaModel(model_id=model_id, vocab_size=vocab_size)
+    model_dst.load_pretrained_checkpoint(ckpt_dir)
+
+    # Verify weights are identical
+    for p1, p2 in zip(model_src.parameters(), model_dst.parameters()):
+        assert torch.allclose(p1, p2)
+
+
+def test_sft_pretrained_checkpoint_warning_and_loading(tmp_path, caplog):
+    import logging
+    import os
+
+    from src.config import TrainingConfig
+    from src.model import FrenchGemmaModel
+    from train.sft import initialize_sft_model
+
+    # Case 1: No pretrained model path passed -> emits warning
+    config_default = TrainingConfig(model_id="google/gemma-3-270m-it", pretrained_model_path=None)
+    with caplog.at_level(logging.WARNING):
+        model1 = initialize_sft_model(config_default, vocab_size=256)
+    assert any("Defaulting to base Gemma 3 checkpoint from HuggingFace" in record.message for record in caplog.records)
+    assert isinstance(model1, FrenchGemmaModel)
+
+    # Case 2: Local pretrained model path passed -> loads checkpoint
+    ckpt_dir = str(tmp_path / "ckpt_pretrain")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    src_model = FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=256)
+    torch.save(src_model.state_dict(), os.path.join(ckpt_dir, "pytorch_model.bin"))
+
+    config_local = TrainingConfig(model_id="google/gemma-3-270m-it", pretrained_model_path=ckpt_dir)
+    model2 = initialize_sft_model(config_local, vocab_size=256)
+    assert isinstance(model2, FrenchGemmaModel)
+    for p1, p2 in zip(src_model.parameters(), model2.parameters()):
+        assert torch.allclose(p1, p2)
+
+
+def test_load_sft_dataset_mix_proportions():
+    from src.config import DatasetMixEntry
+    from src.sft_dataset import load_sft_dataset_mix
+
+    data_mix = [
+        DatasetMixEntry(
+            dataset_path="OpenLLM-France/Luciole-PostTraining-Dataset-1.1",
+            dataset_name="sft_instruct",
+            percentage=40.0,
+        ),
+        DatasetMixEntry(
+            dataset_path="ministere-culture/comparia-votes",
+            percentage=30.0,
+        ),
+        DatasetMixEntry(
+            dataset_path="almanach/fquad",
+            percentage=30.0,
+        ),
+    ]
+
+    fallback_samples = {
+        "OpenLLM-France/Luciole-PostTraining-Dataset-1.1": [
+            [
+                {"role": "user", "content": f"Luciole prompt {i}"},
+                {"role": "assistant", "content": f"Luciole resp {i}"},
+            ]
+            for i in range(100)
+        ],
+        "ministere-culture/comparia-votes": [
+            [
+                {"role": "user", "content": f"Comparia prompt {i}"},
+                {"role": "assistant", "content": f"Comparia resp {i}"},
+            ]
+            for i in range(100)
+        ],
+        "almanach/fquad": [
+            [
+                {"role": "user", "content": f"FQuAD prompt {i}"},
+                {"role": "assistant", "content": f"FQuAD resp {i}"},
+            ]
+            for i in range(100)
+        ],
+    }
+
+    mixed = load_sft_dataset_mix(data_mix, total_examples=100, fallback_conversations=fallback_samples, seed=42)
+    assert len(mixed) == 100
+    luciole_count = sum(1 for m in mixed if "Luciole" in m[0]["content"])
+    comparia_count = sum(1 for m in mixed if "Comparia" in m[0]["content"])
+    fquad_count = sum(1 for m in mixed if "FQuAD" in m[0]["content"])
+
+    assert luciole_count == 40
+    assert comparia_count == 30
+    assert fquad_count == 30
+
+
+def test_sft_dataset_skips_malformed_and_empty_assistant(mock_tokenizer):
+    # Conversations containing 1 valid dialogue, 1 unparseable format, and 1 user-only dialogue
+    raw_data = [
+        {"role": "invalid_structure"},
+        [
+            {"role": "user", "content": "Question without response"},
+        ],
+        [
+            {"role": "user", "content": "Bonjour !"},
+            {"role": "assistant", "content": "Bonjour !"},
+        ],
+    ]
+    ds = SFTDataset(conversations=raw_data, tokenizer=mock_tokenizer, max_seq_len=128)
+    # Only the valid dialogue with assistant response should be retained
+    assert len(ds) == 1
+    item = ds[0]
+    assert any(label_val != -100 for label_val in item["labels"].tolist())
+
+
+def test_sft_dynamic_collator():
+    from src.sft_dataset import SFTDataCollator
+
+    collator = SFTDataCollator(pad_token_id=0, ignore_index=-100)
+    features = [
+        {
+            "input_ids": torch.tensor([1, 2, 3], dtype=torch.long),
+            "labels": torch.tensor([-100, 2, 3], dtype=torch.long),
+            "attention_mask": torch.tensor([1, 1, 1], dtype=torch.long),
+        },
+        {
+            "input_ids": torch.tensor([4, 5], dtype=torch.long),
+            "labels": torch.tensor([-100, 5], dtype=torch.long),
+            "attention_mask": torch.tensor([1, 1], dtype=torch.long),
+        },
+    ]
+    batch = collator(features)
+    assert batch["input_ids"].shape == (2, 3)
+    assert batch["labels"].shape == (2, 3)
+    assert batch["attention_mask"].shape == (2, 3)
+    # Second sample is padded by 1 token
+    assert batch["input_ids"][1, 2].item() == 0
+    assert batch["labels"][1, 2].item() == -100
+    assert batch["attention_mask"][1, 2].item() == 0
+
+
+def test_load_sft_dataset_mix_renormalizes_on_missing_dataset():
+    from src.config import DatasetMixEntry
+    from src.sft_dataset import load_sft_dataset_mix
+
+    data_mix = [
+        DatasetMixEntry(dataset_path="dataset_a", percentage=40.0),
+        DatasetMixEntry(dataset_path="dataset_b_gated", percentage=60.0),
+    ]
+
+    # Only dataset_a has samples (simulating dataset_b failing to load)
+    fallback_samples = {
+        "dataset_a": [
+            [{"role": "user", "content": f"A {i}"}, {"role": "assistant", "content": f"A resp {i}"}]
+            for i in range(50)
+        ],
+        "dataset_b_gated": [],
+    }
+
+    mixed = load_sft_dataset_mix(data_mix, total_examples=20, fallback_conversations=fallback_samples, seed=42)
+    # Should draw all 20 samples from dataset_a
+    assert len(mixed) == 20
+    assert all("A" in m[0]["content"] for m in mixed)
+
+
+def test_load_pretrained_checkpoint_errors(tmp_path):
+    import os
+
+    from src.model import FrenchGemmaModel
+
+    model = FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=256)
+
+    # Error on non-existent path
+    with pytest.raises(FileNotFoundError):
+        model.load_pretrained_checkpoint(str(tmp_path / "non_existent"))
+
+    # Error on empty directory
+    empty_dir = str(tmp_path / "empty_dir")
+    os.makedirs(empty_dir, exist_ok=True)
+    with pytest.raises(FileNotFoundError):
+        model.load_pretrained_checkpoint(empty_dir)
+

@@ -18,9 +18,10 @@ This project implements architectures and practices from the **Gemma 3 Paper**: 
 8.  **Advanced Training Loops**: Full support for mixed-precision (AMP) training, gradient accumulation, gradient clipping, AdamW optimizer, and Cosine Annealing with Warm Restarts and Warmup.
 9.  **Combined Evaluation & Top-5 Checkpoint Management**: Reports progress at regular log intervals and runs evaluation at combined evaluation/save intervals, retaining only the **five best checkpoints** based on evaluation metrics (perplexity/loss) and deleting the worst when an improved checkpoint is saved.
 10. **Proportional Multi-Dataset Mixing**: Supports configuring multi-dataset mixtures (e.g. Wikipedia 50%, OSCAR 30%, C4 20%) with percentage weights via inline YAML or standalone `--data-mix` configs with deterministic interleaving.
-11. **Supervised Fine-Tuning (SFT)**: Turn-based dialogue fine-tuning (`train/sft.py`) utilizing Gemma 3 turn markers (`<start_of_turn>`, `<end_of_turn>`) and prompt loss masking (`labels = -100` on user tokens).
-12. **Direct Preference Optimization (DPO)**: Alignment and RL optimization (`train/dpo.py`) using frozen reference-model log-probabilities and $\beta$ reward margins.
+11. **Supervised Fine-Tuning (SFT)**: Turn-based dialogue fine-tuning (`train/sft.py`) with high-throughput batched fast tokenization (~70,000–90,000 convs/s), live chunk progress telemetry, dynamic 2D batch collation, Gemma 3 turn markers (`<start_of_turn>`, `<end_of_turn>`), and prompt loss masking (`labels = -100` on user/system prompt tokens).
+12. **Direct Preference Optimization (DPO)**: Alignment and RL optimization (`train/dpo.py`) using frozen reference-model log-probabilities, custom reference model loading (`--ref-model-id`), dynamic batch collation with length-based attention masking, and configurable $\beta$ reward margins.
 13. **Interactive Streaming Inference**: Terminal-based chat interface (`inference.py`) with streaming decoding and configurable sampling controls (`do_sample`, `temperature`, `top_p`, `top_k`, `repetition_penalty`).
+14. **Strict AutoModel Architecture & Vocab Validation**: Automatically compares layer tensor shapes, hidden dimensions, and tokenizer vocabulary lengths when loading local checkpoints, preventing silent dimensionality mismatches across pretraining and fine-tuning stages.
 
 ---
 
@@ -181,8 +182,39 @@ source .venv/bin/activate && python -m train.pretrain --config configs/nvidia_co
 Run turn-based conversational fine-tuning on dialogues using the standard Gemma 3 turn format (`<start_of_turn>`, `<end_of_turn>`) with prompt loss masking:
 
 ```bash
-# Run SFT conversational training on macOS MPS or GPU
-source .venv/bin/activate && python -m train.sft --config configs/mlx_config.yaml --max-steps 1000 --learning-rate 2e-5
+# Run SFT continuing from a local pretrained model checkpoint
+source .venv/bin/activate && python -m train.sft --config configs/sft_config.yaml --pretrained-model-path ./checkpoints/pretrain/best_model --max-steps 1000 --learning-rate 2e-5
+```
+
+### Pretrained Checkpoint Continuation & Fallback Warning
+*   **Local Pretrained Checkpoint**: Pass `--pretrained-model-path <path>` (or set `pretrained_model_path` in your config) pointing to a local pretraining checkpoint directory or `.pt`/`.bin` file.
+*   **Base HuggingFace Fallback**: If no local checkpoint is provided, SFT logs a warning:
+    ```text
+    WARNING [train.sft] No local pretrained checkpoint provided via --pretrained-model-path. Defaulting to base Gemma 3 checkpoint from HuggingFace: 'google/gemma-3-270m-it'.
+    ```
+
+### Default SFT Dataset Mixture (`configs/sft_config.yaml`)
+By default, SFT trains on a curated mixture of high-quality French instruction and conversational datasets:
+```text
+├── Data Mix:
+│    ├── 40% OpenLLM-France/Luciole SFT + Claire-Dialogue (Conversational dynamics)
+│    ├── 30% ministere-culture (Organic user intents)
+│    └── 30% FQuAD (Task, reasoning & Q&A)
+```
+
+Configured in `configs/sft_config.yaml`:
+```yaml
+data_mix:
+  - dataset_path: "OpenLLM-France/Luciole-PostTraining-Dataset-1.1"
+    dataset_name: "sft_instruct"
+    percentage: 40.0
+    split: "croissant_aligned_instruct"
+  - dataset_path: "ministere-culture/comparia-votes"
+    percentage: 30.0
+    split: "train"
+  - dataset_path: "almanach/fquad"
+    percentage: 30.0
+    split: "train"
 ```
 
 ### Turn Format & Loss Masking
@@ -199,13 +231,26 @@ Prompt tokens (user and system turns) are automatically assigned a label of `-10
 Align French Gemma models with human preferences using Direct Preference Optimization (DPO):
 
 ```bash
-# Run DPO alignment with beta=0.1
-source .venv/bin/activate && python -m train.dpo --config configs/mlx_config.yaml --dpo-beta 0.1 --max-steps 500 --learning-rate 5e-6
+# Run DPO alignment continuing from an SFT or pretrained checkpoint
+source .venv/bin/activate && python -m train.dpo --config configs/dpo_config.yaml --pretrained-model-path ./checkpoints/sft/best_sft_model --dpo-beta 0.1 --max-steps 500 --learning-rate 5e-6
 ```
+
+### Policy & Reference Model Initialization
+*   **Policy Model Continuation**: Pass `--pretrained-model-path <path>` to initialize the trainable policy model from a local SFT or pretrained checkpoint.
+*   **Distinct Reference Model (`--ref-model-id`)**: By default, the reference model is cloned directly from the policy model and frozen (`requires_grad = False`). You can also specify an independent reference model checkpoint using `--ref-model-id <path>`.
+
+### High-Throughput Formatting & Dynamic Collation
+*   **Batched Preference Encoding**: Encodes preference triplets across dataset chunks in a single multi-threaded call (`batch_format_dpo_pairs`).
+*   **Dynamic 2D Batch Collation**: `DPODataCollator` dynamically determines maximum length per batch and pre-allocates 2D tensors, minimizing padding overhead on shorter queries.
+*   **Length-Based Attention Masking**: Attention masks are constructed from unpadded sequence lengths (`chosen_mask[i, :seq_len] = 1`), preventing legitimate tokens from being masked out if `pad_token_id == 0`.
 
 ### DPO Loss & Reward Metrics
 DPO optimizes the policy $\pi_\theta$ against a frozen reference model $\pi_{\text{ref}}$:
-$$\mathcal{L}_{\text{DPO}}(\pi_\theta; \pi_{\text{ref}}) = -\mathbb{E}_{(x, y_w, y_l)}\left[\log \sigma\left(\beta \log \frac{\pi_\theta(y_w|x)}{\pi_{\text{ref}}(y_w|x)} - \beta \log \frac{\pi_\theta(y_l|x)}{\pi_{\text{ref}}(y_l|x)}\right)\right]$$
+
+```math
+\mathcal{L}_{\text{DPO}}(\pi_\theta; \pi_{\text{ref}}) = -\mathbb{E}_{(x, y_w, y_l)} \left[ \log \sigma \left( \beta \log \frac{\pi_\theta(y_w \mid x)}{\pi_{\text{ref}}(y_w \mid x)} - \beta \log \frac{\pi_\theta(y_l \mid x)}{\pi_{\text{ref}}(y_l \mid x)} \right) \right]
+```
+
 During training, the trainer monitors `reward_accuracy` and `reward_margin` metrics to track alignment progress.
 
 ---

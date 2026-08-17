@@ -5,19 +5,23 @@ Aligns model responses with human preferences using implicit reward margins
 and reference model log-probability scoring.
 """
 
-import json
+import dataclasses
 import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Tuple
 
 import torch
-from transformers import AutoTokenizer
 
 from src.config import TrainingConfig
-from src.dataset import train_custom_tokenizer
-from src.dpo_dataset import DPODataset, get_dpo_dataloader
+from src.dataset import load_tokenizer_for_post_training
+from src.dpo_dataset import (
+    DPODataset,
+    get_dpo_dataloader,
+    load_dpo_pairs,
+    normalize_dpo_pair,
+)
 from src.model import FrenchGemmaModel
 from src.scheduler import get_cosine_warmup_scheduler
 from train.cli import parse_args_to_config
@@ -25,59 +29,58 @@ from train.strategies.dpo import DPOStrategy
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_FRENCH_DPO_PAIRS: List[Dict[str, Any]] = [
-    {
-        "prompt": "Bonjour, comment t'appelles-tu ?",
-        "chosen": "Bonjour, je suis FrenchGemma, un LLM entraîné en français.",
-        "rejected": "Je ne sais pas.",
-    },
-    {
-        "prompt": "Peux-tu m'expliquer ce qu'est l'apprentissage automatique ?",
-        "chosen": (
-            "L'apprentissage automatique (machine learning) est une branche de l'intelligence artificielle "
-            "qui permet aux ordinateurs d'apprendre à partir de données pour accomplir des tâches sans être "
-            "explicitement programmés."
-        ),
-        "rejected": "C'est des maths sur ordinateur.",
-    },
-    {
-        "prompt": "Quelle est la capitale de la France ?",
-        "chosen": "La capitale de la France est Paris.",
-        "rejected": "C'est Lyon ou Marseille.",
-    },
-]
 
-
-def load_dpo_pairs(data_path: Optional[str] = None) -> List[Any]:
-    """Loads DPO preference pairs from JSON/JSONL file or returns default French preference pairs."""
-    if data_path is not None:
-        if not os.path.exists(data_path):
-            raise FileNotFoundError(f"DPO dataset file not found: {data_path}")
-        logger.info(f"Loading DPO preference data from {data_path}...")
-        pairs: List[Any] = []
-        if data_path.endswith(".jsonl"):
-            with open(data_path, "r", encoding="utf-8") as f:
-                for idx, line in enumerate(f, start=1):
-                    if line.strip():
-                        try:
-                            pairs.append(json.loads(line.strip()))
-                        except json.JSONDecodeError as err:
-                            raise ValueError(f"Malformed JSONL at {data_path}:{idx}: {err}") from err
+def initialize_dpo_models(
+    config: TrainingConfig, vocab_size: int
+) -> Tuple[FrenchGemmaModel, FrenchGemmaModel]:
+    """
+    Initializes the policy model and frozen reference model for DPO.
+    Loads the pretrained/SFT checkpoint into the policy model if configured,
+    and sets up the frozen reference model (either from ref_model_id or cloned policy).
+    """
+    policy_model = FrenchGemmaModel(
+        model_id=config.model_id,
+        vocab_size=vocab_size,
+        embedding_noise_std=0.0,
+    )
+    if config.pretrained_model_path:
+        if os.path.exists(config.pretrained_model_path):
+            logger.info(f"Loading policy model weights from: {config.pretrained_model_path}")
+            policy_model.load_pretrained_checkpoint(config.pretrained_model_path)
         else:
-            with open(data_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    pairs = data
-                elif isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
-                    pairs = data["data"]
-                else:
-                    raise ValueError(f"Expected list or dictionary with 'data' list in {data_path}")
-        if not pairs:
-            raise ValueError(f"No preference pairs loaded from {data_path}")
-        return pairs
+            raise FileNotFoundError(
+                f"Specified pretrained_model_path does not exist: {config.pretrained_model_path}"
+            )
+    else:
+        logger.warning(
+            "No local pretrained/SFT checkpoint provided via --pretrained-model-path. "
+            f"Defaulting to base Gemma 3 checkpoint from HuggingFace: '{config.model_id}'."
+        )
 
-    logger.info("Using default French preference alignment dataset.")
-    return DEFAULT_FRENCH_DPO_PAIRS
+    policy_model.ensure_tokenizer_vocab_alignment(vocab_size)
+
+    ref_model = FrenchGemmaModel(
+        model_id=config.model_id,
+        vocab_size=vocab_size,
+        embedding_noise_std=0.0,
+    )
+    if config.ref_model_id:
+        logger.info(f"Loading distinct reference model weights from: {config.ref_model_id}")
+        if os.path.exists(config.ref_model_id):
+            ref_model.load_pretrained_checkpoint(config.ref_model_id)
+        else:
+            raise FileNotFoundError(
+                f"Specified ref_model_id checkpoint does not exist: {config.ref_model_id}"
+            )
+    else:
+        ref_model.load_state_dict(policy_model.state_dict())
+
+    ref_model.ensure_tokenizer_vocab_alignment(vocab_size)
+    ref_model.eval()
+    for param in ref_model.parameters():
+        param.requires_grad = False
+
+    return policy_model, ref_model
 
 
 def main() -> None:
@@ -93,38 +96,37 @@ def main() -> None:
     )
 
     logger.info(
-        f"DPO Alignment launched. Model: {config.model_id} | Beta: {config.dpo_beta} | "
-        f"Device: {config.device} | Max Seq Len: {config.max_sequence_length}"
+        f"DPO Training launched. Model: {config.model_id} | Device: {config.device} | "
+        f"Beta: {config.dpo_beta} | Label Smoothing: {config.dpo_label_smoothing}"
     )
 
-    tokenizer_dir = os.path.join(config.data_cache_dir, "tokenizer_checkpoint")
-    if os.path.exists(os.path.join(tokenizer_dir, "tokenizer.json")):
-        logger.info(f"Loading existing tokenizer from {tokenizer_dir}")
-        tokenizer: Any = AutoTokenizer.from_pretrained(tokenizer_dir)
-    else:
-        logger.info("Training initial tokenizer with Gemma 3 turn tokens...")
-        seed_texts = [
-            "<start_of_turn>user\nBonjour, comment t'appelles-tu ?<end_of_turn>\n"
-            "<start_of_turn>model\nBonjour, je suis FrenchGemma, un LLM entraîné en français.<end_of_turn>\n",
-            "Texte d'entraînement français pour initialisation du tokenizer.",
-        ]
-        tokenizer = train_custom_tokenizer(
-            seed_texts,
-            vocab_size=config.vocab_size,
-            save_dir=tokenizer_dir,
-        )
-
-    dpo_data_path = (
-        config.dataset_path
-        if config.dataset_path and config.dataset_path != "wikimedia/wikipedia"
-        else None
+    tokenizer = load_tokenizer_for_post_training(
+        model_id=config.model_id,
+        data_cache_dir=config.data_cache_dir,
+        pretrained_model_path=config.pretrained_model_path,
     )
-    pairs = load_dpo_pairs(dpo_data_path)
+    pairs = load_dpo_pairs(config.dataset_path if config.dataset_path != "wikimedia/wikipedia" else None)
+
+    if pairs:
+        first_pair = normalize_dpo_pair(pairs[0])
+        logger.info("=" * 80)
+        logger.info("ACTUAL LOADED PREFERENCE PAIR SAMPLE:")
+        logger.info("-" * 80)
+        logger.info(f"  [PROMPT]:\n    {first_pair[0]}")
+        logger.info(f"  [CHOSEN]:\n    {first_pair[1]}")
+        logger.info(f"  [REJECTED]:\n    {first_pair[2]}")
+        logger.info("=" * 80)
+
     dpo_dataset = DPODataset(
         pairs=pairs,
         tokenizer=tokenizer,
         max_seq_len=config.max_sequence_length,
     )
+
+    if len(dpo_dataset) == 0:
+        raise ValueError(
+            "DPODataset contains 0 valid preference pairs after processing and filtering. Cannot train."
+        )
 
     dataloader = get_dpo_dataloader(
         dataset=dpo_dataset,
@@ -134,24 +136,15 @@ def main() -> None:
         pin_memory=config.pin_memory,
         seed=config.seed,
     )
+    logger.info(
+        f"DataLoader ready: batch_size={config.batch_size}, "
+        f"gradient_accumulation_steps={config.gradient_accumulation_steps} "
+        f"(effective batch size: {config.batch_size * config.gradient_accumulation_steps})."
+    )
 
-    logger.info("Initializing Policy Model for DPO...")
-    policy_model = FrenchGemmaModel(
-        model_id=config.model_id,
-        vocab_size=len(tokenizer),
-        embedding_noise_std=0.0,
-    ).to(config.device)
-
-    logger.info("Initializing Frozen Reference Model for DPO...")
-    ref_model = FrenchGemmaModel(
-        model_id=config.model_id,
-        vocab_size=len(tokenizer),
-        embedding_noise_std=0.0,
-    ).to(config.device)
-    ref_model.load_state_dict(policy_model.state_dict())
-    ref_model.eval()
-    for param in ref_model.parameters():
-        param.requires_grad = False
+    policy_model, ref_model = initialize_dpo_models(config=config, vocab_size=len(tokenizer))
+    policy_model = policy_model.to(config.device)
+    ref_model = ref_model.to(config.device)
 
     strategy = DPOStrategy(
         ref_model=ref_model,
@@ -201,6 +194,7 @@ def main() -> None:
                 should_save = True
 
         if should_save:
+            tmp_checkpoint_path = f"{checkpoint_path}.tmp"
             torch.save(
                 {
                     "step": step_idx,
@@ -208,10 +202,11 @@ def main() -> None:
                     "optimizer_state_dict": optimizer.state_dict(),
                     "loss": current_loss,
                     "metrics": strategy.latest_metrics,
-                    "config": config,
+                    "config": dataclasses.asdict(config),
                 },
-                checkpoint_path,
+                tmp_checkpoint_path,
             )
+            os.replace(tmp_checkpoint_path, checkpoint_path)
             best_checkpoints.append({"path": checkpoint_path, "loss": current_loss, "step": step_idx})
             logger.info(f"Saved new best DPO checkpoint (loss={current_loss:.4f}): {checkpoint_path}")
 
@@ -231,7 +226,14 @@ def main() -> None:
                         logger.warning(f"Failed to remove checkpoint {worst_path}: {e}")
                 best_checkpoints.remove(worst_to_delete)
 
-    logger.info(f"Starting DPO alignment loop for {config.max_steps} steps...")
+    step_start_time = time.time()
+    warmup_steps = config.warmup_steps or int(config.max_steps * (config.warmup_ratio or 0.03))
+    logger.info(
+        f"Starting DPO alignment loop for {config.max_steps} steps "
+        f"(Warmup: {warmup_steps} steps | Initial LR: {scheduler.get_last_lr()[0]:.2e} -> "
+        f"Target: {config.learning_rate:.2e} | Log interval: every {config.log_interval} steps | "
+        f"Eval/Save interval: every {config.eval_interval} steps)..."
+    )
     try:
         while step < config.max_steps:
             for batch in dataloader:
@@ -249,7 +251,7 @@ def main() -> None:
                 accum_loss += loss.item()
                 accum_batches += 1
 
-                if accum_batches % config.gradient_accumulation_steps == 0 or (step + 1) >= config.max_steps:
+                if accum_batches % config.gradient_accumulation_steps == 0:
                     torch.nn.utils.clip_grad_norm_(policy_model.parameters(), max_norm=1.0)
                     optimizer.step()
                     scheduler.step()
@@ -259,17 +261,20 @@ def main() -> None:
                     accum_loss = 0.0
                     accum_batches = 0
 
-                    if step % config.log_interval == 0:
+                    if step == 1 or step % config.log_interval == 0 or step == config.max_steps:
                         current_lr = scheduler.get_last_lr()[0]
                         elapsed = time.time() - t0
+                        step_time = time.time() - step_start_time
                         metrics = strategy.latest_metrics
                         reward_acc = metrics.get("reward_accuracy", 0.0)
                         reward_margin = metrics.get("reward_margin", 0.0)
+                        phase = f"Warmup ({step}/{warmup_steps})" if step <= warmup_steps else "Training"
                         logger.info(
-                            f"Step {step}/{config.max_steps} | DPO Loss: {step_loss:.4f} | "
+                            f"Step {step}/{config.max_steps} [{phase}] | DPO Loss: {step_loss:.4f} | "
                             f"Reward Acc: {reward_acc * 100:.1f}% | Margin: {reward_margin:.4f} | "
-                            f"LR: {current_lr:.2e} | Elapsed: {elapsed:.1f}s"
+                            f"LR: {current_lr:.2e} | Step Time: {step_time:.2f}s | Total Elapsed: {elapsed:.1f}s"
                         )
+                    step_start_time = time.time()
 
                     # Combined eval and save interval
                     if step % config.eval_interval == 0 or step == config.max_steps:

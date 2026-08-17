@@ -157,11 +157,13 @@ def main() -> None:
         seed=config.seed,
     )
 
-    model: torch.nn.Module = FrenchGemmaModel(
+    base_model = FrenchGemmaModel(
         model_id=config.model_id,
         vocab_size=len(tokenizer),
         embedding_noise_std=config.embedding_noise_std,
-    ).to(device)
+    )
+    base_model.ensure_tokenizer_vocab_alignment(tokenizer)
+    model: torch.nn.Module = base_model.to(device)
 
     if is_distributed:
         device_ids = [local_rank] if "cuda" in device else None

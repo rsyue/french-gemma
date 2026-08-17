@@ -134,6 +134,7 @@ class TrainingConfig:
     dpo_label_smoothing: float = 0.0
     ref_model_id: Optional[str] = None
     save_dir: Optional[str] = None
+    pretrained_model_path: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.save_dir is not None:
@@ -151,6 +152,14 @@ class TrainingConfig:
             raise ValueError(f"log_interval must be >= 1, got {self.log_interval}")
         if self.batch_size < 1:
             raise ValueError(f"batch_size must be >= 1, got {self.batch_size}")
+        if self.learning_rate <= 0:
+            raise ValueError(f"learning_rate must be > 0, got {self.learning_rate}")
+        if self.max_sequence_length < 1:
+            raise ValueError(f"max_sequence_length must be >= 1, got {self.max_sequence_length}")
+        if self.gradient_accumulation_steps < 1:
+            raise ValueError(
+                f"gradient_accumulation_steps must be >= 1, got {self.gradient_accumulation_steps}"
+            )
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "TrainingConfig":

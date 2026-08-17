@@ -15,6 +15,7 @@ from src.dataset import (
     get_dataloader,
     is_data_prepared,
     load_french_dataset,
+    load_tokenizer_for_post_training,
     prepare_and_pack_data,
     train_custom_tokenizer,
     wait_for_data_prep,
@@ -120,6 +121,28 @@ def test_wait_for_data_prep_timeout():
 
         with pytest.raises(TimeoutError):
             wait_for_data_prep(cache_bin, tok_dir, poll_interval=0.1, timeout=0.3, log_interval=0.1)
+
+
+def test_load_tokenizer_for_post_training(tmp_path, mock_texts):
+    # 1. Test loading from pretraining cache
+    cache_dir = str(tmp_path / "cache")
+    tok_dir = os.path.join(cache_dir, "tokenizer_checkpoint")
+    train_custom_tokenizer(mock_texts, vocab_size=100, save_dir=tok_dir)
+
+    tok1 = load_tokenizer_for_post_training(
+        model_id="google/gemma-3-270m-it",
+        data_cache_dir=cache_dir,
+    )
+    assert len(tok1) >= 256
+
+    # 2. Test loading from pretrained checkpoint directory
+    ckpt_dir = str(tmp_path / "ckpt_dir")
+    train_custom_tokenizer(mock_texts, vocab_size=100, save_dir=ckpt_dir)
+    tok2 = load_tokenizer_for_post_training(
+        model_id="google/gemma-3-270m-it",
+        pretrained_model_path=ckpt_dir,
+    )
+    assert len(tok2) >= 256
 
 
 

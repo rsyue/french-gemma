@@ -1,8 +1,9 @@
 model_id: "google/gemma-3-270m-it"
+pretrained_model_path: null  # Path to local pretrained checkpoint directory (e.g. ./checkpoints/pretrain/best_model)
 device: "cuda"
 max_sequence_length: 4096
-batch_size: 2
-gradient_accumulation_steps: 8
+batch_size: 4
+gradient_accumulation_steps: 16
 learning_rate: 2.0e-5
 weight_decay: 0.01
 warmup_steps: 50
@@ -12,11 +13,24 @@ amp_enabled: true
 amp_dtype: "bfloat16"
 log_interval: 20
 save_interval: 500
-eval_interval: 250
-num_workers: 2
-prefetch_factor: 2
+eval_interval: 500
+num_workers: 0
+prefetch_factor: null
 pin_memory: true
-vocab_size: 35000
+vocab_size: 50000
 dist_timeout_seconds: 7200
 seed: 42
 save_dir: "./checkpoints/sft"
+
+data_mix:
+  - dataset_path: "OpenLLM-France/Luciole-PostTraining-Dataset-1.1"
+    dataset_name: "sft_instruct"
+    percentage: 40.0
+    split: "croissant_aligned_instruct"
+  - dataset_path: "ministere-culture/comparia-votes"
+    percentage: 30.0
+    split: "train"
+  - dataset_path: "CATIE-AQ/frenchQA"
+    percentage: 30.0
+    split: "train"
+

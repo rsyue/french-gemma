@@ -16,7 +16,7 @@ import torch
 from datasets import load_dataset
 from tokenizers import ByteLevelBPETokenizer
 from torch.utils.data import DataLoader, Dataset
-from transformers import DataCollatorForLanguageModeling, PreTrainedTokenizerFast
+from transformers import AutoTokenizer, DataCollatorForLanguageModeling, PreTrainedTokenizerFast
 
 from src.config import DatasetMixEntry
 
@@ -238,6 +238,48 @@ def train_custom_tokenizer(
     return hf_tokenizer
 
 
+def load_tokenizer_for_post_training(
+    model_id: str,
+    data_cache_dir: Optional[str] = None,
+    pretrained_model_path: Optional[str] = None,
+) -> Any:
+    """
+    Loads an existing tokenizer for post-training (SFT, DPO, RL).
+    Tokenizer training is strictly reserved for pretraining.
+    Looks for existing tokenizer in:
+      1. pretrained_model_path (if provided and contains tokenizer files)
+      2. data_cache_dir/tokenizer_checkpoint (pretraining cache)
+      3. model_id (base model)
+    """
+    if pretrained_model_path and os.path.isdir(pretrained_model_path):
+        try:
+            tok = AutoTokenizer.from_pretrained(pretrained_model_path)
+            logger.info(f"Loading existing tokenizer from pretrained checkpoint: {pretrained_model_path}")
+            if tok.pad_token is None:
+                tok.pad_token = tok.eos_token or "<pad>"
+            return tok
+        except Exception as err:
+            logger.debug(f"Could not load tokenizer directly from {pretrained_model_path}: {err}")
+
+    if data_cache_dir:
+        tokenizer_dir = os.path.join(data_cache_dir, "tokenizer_checkpoint")
+        if os.path.isdir(tokenizer_dir):
+            try:
+                tok = AutoTokenizer.from_pretrained(tokenizer_dir)
+                logger.info(f"Loading existing tokenizer from pretraining cache: {tokenizer_dir}")
+                if tok.pad_token is None:
+                    tok.pad_token = tok.eos_token or "<pad>"
+                return tok
+            except Exception as err:
+                logger.debug(f"Could not load tokenizer from {tokenizer_dir}: {err}")
+
+    logger.info(f"Loading existing tokenizer as-is from base model ID: {model_id}")
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token or "<pad>"
+    return tokenizer
+
+
 def load_french_dataset(
     dataset_path: str = "wikimedia/wikipedia",
     dataset_name: Optional[str] = "20231101.fr",
@@ -250,9 +292,9 @@ def load_french_dataset(
     """
     try:
         if dataset_name is not None:
-            ds = load_dataset(dataset_path, dataset_name, split=split)
+            ds = load_dataset(dataset_path, dataset_name, split=split, verification_mode="no_checks")
         else:
-            ds = load_dataset(dataset_path, split=split)
+            ds = load_dataset(dataset_path, split=split, verification_mode="no_checks")
         # Extract text column
         if "text" in ds.column_names:
             return ds["text"]  # type: ignore[no-any-return]
