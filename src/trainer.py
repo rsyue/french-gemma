@@ -6,6 +6,7 @@ mixed-precision training, gradient accumulation, model evaluation, checkpoints
 management (perplexity and loss based), and TensorBoard metrics logging.
 """
 
+import dataclasses
 import json
 import logging
 import math
@@ -20,6 +21,8 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from transformers import PreTrainedTokenizerFast
+
+from src.dataset import GEMMA_CHAT_TEMPLATE
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +73,96 @@ def generate_text(
     if isinstance(decoded, list):
         return decoded[0] if decoded else ""
     return str(decoded)
+
+
+def save_hf_checkpoint_dir(
+    checkpoint_path: str,
+    model: Any,
+    tokenizer: Optional[Any] = None,
+    optimizer: Optional[torch.optim.Optimizer] = None,
+    lr_scheduler: Optional[Any] = None,
+    global_step: int = 0,
+    metrics: Optional[Dict[str, Any]] = None,
+    config: Optional[Any] = None,
+    chat_template: Optional[str] = None,
+) -> None:
+    """
+    Saves a complete, Hugging Face compatible checkpoint directory containing:
+    - Model weights (pytorch_model.bin)
+    - Architecture configuration (config.json with Gemma3ForCausalLM architecture & chat_template)
+    - Tokenizer files (tokenizer.json, tokenizer_config.json, special_tokens_map.json with chat_template)
+    - Training optimization state (training_state.pt with optimizer, scheduler, metrics, step, config)
+    """
+    os.makedirs(checkpoint_path, exist_ok=True)
+
+    # 1. Extract raw model (unwrap compile, DDP, and custom wrappers)
+    raw_model: Any = model
+    while hasattr(raw_model, "_orig_mod") or isinstance(raw_model, nn.parallel.DistributedDataParallel):
+        if hasattr(raw_model, "_orig_mod"):
+            raw_model = raw_model._orig_mod
+        elif isinstance(raw_model, nn.parallel.DistributedDataParallel):
+            raw_model = raw_model.module
+
+    # Resolve effective chat template
+    effective_chat_template = chat_template or getattr(tokenizer, "chat_template", None) or GEMMA_CHAT_TEMPLATE
+
+    # 2. Configure and save Hugging Face config.json
+    raw_config = getattr(raw_model, "config", None)
+    if raw_config is not None:
+        raw_config.architectures = ["Gemma3ForCausalLM"]
+        if effective_chat_template is not None:
+            setattr(raw_config, "chat_template", effective_chat_template)
+
+        num_layers = getattr(raw_config, "num_hidden_layers", None)
+        layer_types = getattr(raw_config, "layer_types", None)
+        if num_layers is not None and layer_types is not None and len(layer_types) != num_layers:
+            if len(layer_types) > num_layers:
+                raw_config.layer_types = layer_types[:num_layers]
+            else:
+                default_type = layer_types[-1] if layer_types else "full_attention"
+                raw_config.layer_types = list(layer_types) + [default_type] * (num_layers - len(layer_types))
+
+        try:
+            raw_config.save_pretrained(checkpoint_path)
+        except Exception as e:
+            logger.warning(f"Failed to save Hugging Face config via save_pretrained: {e}")
+            try:
+                config_dict = raw_config.to_dict() if hasattr(raw_config, "to_dict") else vars(raw_config)
+                if effective_chat_template is not None:
+                    config_dict["chat_template"] = effective_chat_template
+                with open(os.path.join(checkpoint_path, "config.json"), "w", encoding="utf-8") as f:
+                    json.dump(config_dict, f, indent=2)
+            except Exception as e2:
+                logger.warning(f"Failed to save fallback config.json: {e2}")
+
+    # 3. Save model weights
+    weights_path = os.path.join(checkpoint_path, "pytorch_model.bin")
+    torch.save(raw_model.state_dict(), weights_path)
+
+    # 4. Save tokenizer files with chat_template
+    if tokenizer is not None:
+        if effective_chat_template is not None:
+            tokenizer.chat_template = effective_chat_template
+        if hasattr(tokenizer, "save_pretrained"):
+            tokenizer.save_pretrained(checkpoint_path)
+
+    # 5. Save training state
+    training_state: Dict[str, Any] = {
+        "global_step": global_step,
+        "metrics": metrics or {},
+    }
+    if optimizer is not None:
+        training_state["optimizer_state_dict"] = optimizer.state_dict()
+    if lr_scheduler is not None and hasattr(lr_scheduler, "state_dict"):
+        training_state["lr_scheduler_state_dict"] = lr_scheduler.state_dict()
+    if config is not None:
+        if dataclasses.is_dataclass(config) and not isinstance(config, type):
+            training_state["config"] = dataclasses.asdict(config)
+        else:
+            training_state["config"] = config
+
+    torch.save(training_state, os.path.join(checkpoint_path, "training_state.pt"))
+    logger.info(f"Hugging Face compatible checkpoint directory saved at: {checkpoint_path}")
 
 
 class Pretrainer:
@@ -384,55 +477,16 @@ class Pretrainer:
         if not self.is_main_process:
             return
 
-        os.makedirs(checkpoint_path, exist_ok=True)
-
-        # Extract raw model (unwrap compile and DDP)
-        raw_model: Any = self.model
-        while hasattr(raw_model, "_orig_mod") or isinstance(raw_model, nn.parallel.DistributedDataParallel):
-            if hasattr(raw_model, "_orig_mod"):
-                raw_model = raw_model._orig_mod
-            elif isinstance(raw_model, nn.parallel.DistributedDataParallel):
-                raw_model = raw_model.module
-
-        # Ensure the raw model config architectures is set to Gemma3ForCausalLM
-        if hasattr(raw_model, "config") and raw_model.config is not None:
-            raw_model.config.architectures = ["Gemma3ForCausalLM"]
-
-            num_layers = getattr(raw_model.config, "num_hidden_layers", None)
-            layer_types = getattr(raw_model.config, "layer_types", None)
-            if num_layers is not None and layer_types is not None and len(layer_types) != num_layers:
-                if len(layer_types) > num_layers:
-                    raw_model.config.layer_types = layer_types[:num_layers]
-                else:
-                    default_type = layer_types[-1] if layer_types else "full_attention"
-                    raw_model.config.layer_types = list(layer_types) + [default_type] * (num_layers - len(layer_types))
-
-            try:
-                raw_model.config.save_pretrained(checkpoint_path)
-            except Exception as e:
-                logger.warning(f"Failed to save Hugging Face config: {e}")
-                try:
-                    with open(os.path.join(checkpoint_path, "config.json"), "w", encoding="utf-8") as f:
-                        json.dump(raw_model.config.to_dict(), f, indent=2)
-                except Exception as e2:
-                    logger.warning(f"Failed to save fallback config.json: {e2}")
-
-        weights_path = os.path.join(checkpoint_path, "pytorch_model.bin")
-        torch.save(raw_model.state_dict(), weights_path)
-
-        if self.tokenizer is not None and hasattr(self.tokenizer, "save_pretrained"):
-            self.tokenizer.save_pretrained(checkpoint_path)
-
-        training_state = {
-            "global_step": global_step,
-            "optimizer_state_dict": self.optimizer.state_dict(),
-            "metrics": metrics,
-        }
-        if self.lr_scheduler is not None:
-            training_state["lr_scheduler_state_dict"] = self.lr_scheduler.state_dict()
-
-        torch.save(training_state, os.path.join(checkpoint_path, "training_state.pt"))
-        logger.info(f"Hugging Face compatible checkpoint directory saved at: {checkpoint_path}")
+        save_hf_checkpoint_dir(
+            checkpoint_path=checkpoint_path,
+            model=self.model,
+            tokenizer=self.tokenizer,
+            optimizer=self.optimizer,
+            lr_scheduler=self.lr_scheduler,
+            global_step=global_step,
+            metrics=metrics,
+            chat_template=getattr(self.tokenizer, "chat_template", None) or GEMMA_CHAT_TEMPLATE,
+        )
 
     def save_best_checkpoint(
         self,

@@ -259,6 +259,7 @@ def test_load_dpo_pairs_file_handling(tmp_path):
 
 def test_dpo_checkpoint_rotation_logic(tmp_path):
     import os
+    import shutil
 
     output_dir = str(tmp_path / "checkpoints_dpo")
     os.makedirs(output_dir, exist_ok=True)
@@ -266,7 +267,7 @@ def test_dpo_checkpoint_rotation_logic(tmp_path):
     max_checkpoints = 5
 
     def mock_save_if_better(step_idx: int, current_loss: float):
-        checkpoint_name = f"dpo_checkpoint_step_{step_idx}_loss_{current_loss:.4f}.pt"
+        checkpoint_name = f"checkpoint-step-{step_idx}-loss-{current_loss:.4f}"
         checkpoint_path = os.path.join(output_dir, checkpoint_name)
         should_save = False
         if len(best_checkpoints) < max_checkpoints:
@@ -276,10 +277,14 @@ def test_dpo_checkpoint_rotation_logic(tmp_path):
             if current_loss < worst["loss"]:
                 should_save = True
                 if os.path.exists(worst["path"]):
-                    os.remove(worst["path"])
+                    if os.path.isdir(worst["path"]):
+                        shutil.rmtree(worst["path"])
+                    else:
+                        os.remove(worst["path"])
                 best_checkpoints.remove(worst)
         if should_save:
-            with open(checkpoint_path, "w") as f:
+            os.makedirs(checkpoint_path, exist_ok=True)
+            with open(os.path.join(checkpoint_path, "mock_state.pt"), "w") as f:
                 f.write("mock_dpo_checkpoint")
             best_checkpoints.append({"path": checkpoint_path, "loss": current_loss, "step": step_idx})
         return should_save
@@ -298,8 +303,44 @@ def test_dpo_checkpoint_rotation_logic(tmp_path):
     assert mock_save_if_better(7, 0.4) is True
     assert len(os.listdir(output_dir)) == 5
     files = os.listdir(output_dir)
-    assert not any("loss_1.5000" in f for f in files)
-    assert any("loss_0.4000" in f for f in files)
+    assert not any("loss-1.5000" in f for f in files)
+    assert any("loss-0.4000" in f for f in files)
+
+
+def test_dpo_save_hf_checkpoint_dir(tmp_path):
+    import json
+    import os
+
+    from src.dataset import GEMMA_CHAT_TEMPLATE, train_custom_tokenizer
+    from src.model import FrenchGemmaModel
+    from src.trainer import save_hf_checkpoint_dir
+
+    tok_dir = str(tmp_path / "mock_tok_dpo")
+    tokenizer = train_custom_tokenizer(["Préférence 1", "Préférence 2"], vocab_size=120, save_dir=tok_dir)
+    model = FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=len(tokenizer))
+    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-6)
+
+    ckpt_dir = str(tmp_path / "checkpoint-step-200-loss-0.6543")
+    save_hf_checkpoint_dir(
+        checkpoint_path=ckpt_dir,
+        model=model,
+        tokenizer=tokenizer,
+        optimizer=optimizer,
+        global_step=200,
+        metrics={"loss": 0.6543, "reward_accuracy": 0.85},
+        chat_template=GEMMA_CHAT_TEMPLATE,
+    )
+
+    assert os.path.exists(os.path.join(ckpt_dir, "config.json"))
+    assert os.path.exists(os.path.join(ckpt_dir, "pytorch_model.bin"))
+    assert os.path.exists(os.path.join(ckpt_dir, "tokenizer.json"))
+    assert os.path.exists(os.path.join(ckpt_dir, "tokenizer_config.json"))
+    assert os.path.exists(os.path.join(ckpt_dir, "training_state.pt"))
+
+    with open(os.path.join(ckpt_dir, "config.json"), "r") as f:
+        cfg = json.load(f)
+    assert "Gemma3ForCausalLM" in cfg.get("architectures", [])
+    assert cfg.get("chat_template") == GEMMA_CHAT_TEMPLATE
 
 
 def test_initialize_dpo_models_ref_model_loading(tmp_path):

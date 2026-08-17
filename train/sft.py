@@ -5,9 +5,9 @@ Executes turn-based conversational fine-tuning with prompt masking
 using Gemma 3 turn tokens (<bos>, <eos>, <start_of_turn>, <end_of_turn>).
 """
 
-import dataclasses
 import logging
 import os
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Dict, List
@@ -15,7 +15,7 @@ from typing import Any, Dict, List
 import torch
 
 from src.config import TrainingConfig
-from src.dataset import load_tokenizer_for_post_training
+from src.dataset import GEMMA_CHAT_TEMPLATE, load_tokenizer_for_post_training
 from src.model import FrenchGemmaModel
 from src.scheduler import get_cosine_warmup_scheduler
 from src.sft_dataset import (
@@ -26,6 +26,7 @@ from src.sft_dataset import (
     load_sft_conversations,
     load_sft_dataset_mix,
 )
+from src.trainer import save_hf_checkpoint_dir
 from train.builder import TrainingFactory
 from train.cli import parse_args_to_config
 
@@ -211,7 +212,7 @@ def main() -> None:
     def save_if_better(step_idx: int, current_loss: float) -> None:
         if config.max_checkpoints <= 0:
             return
-        checkpoint_name = f"sft_checkpoint_step_{step_idx}_loss_{current_loss:.4f}.pt"
+        checkpoint_name = f"checkpoint-step-{step_idx}-loss-{current_loss:.4f}"
         checkpoint_path = os.path.join(config.output_dir, checkpoint_name)
         should_save = False
         if len(best_checkpoints) < config.max_checkpoints:
@@ -222,18 +223,17 @@ def main() -> None:
                 should_save = True
 
         if should_save:
-            tmp_checkpoint_path = f"{checkpoint_path}.tmp"
-            torch.save(
-                {
-                    "step": step_idx,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "loss": current_loss,
-                    "config": dataclasses.asdict(config),
-                },
-                tmp_checkpoint_path,
+            save_hf_checkpoint_dir(
+                checkpoint_path=checkpoint_path,
+                model=model,
+                tokenizer=tokenizer,
+                optimizer=optimizer,
+                lr_scheduler=scheduler,
+                global_step=step_idx,
+                metrics={"loss": current_loss},
+                config=config,
+                chat_template=getattr(tokenizer, "chat_template", None) or GEMMA_CHAT_TEMPLATE,
             )
-            os.replace(tmp_checkpoint_path, checkpoint_path)
             best_checkpoints.append({"path": checkpoint_path, "loss": current_loss, "step": step_idx})
             logger.info(f"Saved new best SFT checkpoint (loss={current_loss:.4f}): {checkpoint_path}")
 
@@ -244,7 +244,10 @@ def main() -> None:
                 worst_resolved = Path(worst_path).resolve()
                 if worst_resolved.is_relative_to(out_resolved) and os.path.exists(worst_path):
                     try:
-                        os.remove(worst_path)
+                        if os.path.isdir(worst_path):
+                            shutil.rmtree(worst_path)
+                        else:
+                            os.remove(worst_path)
                         logger.info(
                             f"Removed worst SFT checkpoint ({worst_to_delete['loss']:.4f}) to maintain "
                             f"top {config.max_checkpoints}: {worst_path}"

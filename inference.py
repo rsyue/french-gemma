@@ -6,6 +6,8 @@ and configurable generation sampling parameters.
 """
 
 import argparse
+import json
+import os
 import sys
 from typing import Any, List, Optional, Tuple
 
@@ -115,15 +117,64 @@ def parse_args(args_list: Optional[List[str]] = None) -> argparse.Namespace:
     return parser.parse_args(args_list)
 
 
+def find_tokenizer_path(model_id: str) -> str:
+    """Find tokenizer path from directory or potential candidate locations."""
+    if os.path.isdir(model_id):
+        tok_files = ("tokenizer.json", "tokenizer_config.json", "vocab.json")
+        # 1. Directly in model directory
+        if any(os.path.exists(os.path.join(model_id, f)) for f in tok_files):
+            return model_id
+        # 2. Check subdirectory 'tokenizer_checkpoint'
+        sub_tok = os.path.join(model_id, "tokenizer_checkpoint")
+        if os.path.isdir(sub_tok) and any(os.path.exists(os.path.join(sub_tok, f)) for f in tok_files):
+            return sub_tok
+        # 3. Check sibling 'tokenizer_checkpoint' or parent directories
+        parent = os.path.dirname(os.path.abspath(model_id))
+        sibling_tok = os.path.join(parent, "tokenizer_checkpoint")
+        if os.path.isdir(sibling_tok) and any(os.path.exists(os.path.join(sibling_tok, f)) for f in tok_files):
+            return sibling_tok
+        # 4. Check default cache locations
+        for default_loc in ("./data_cache/tokenizer_checkpoint", "./tokenizer_checkpoint"):
+            if os.path.isdir(default_loc) and any(os.path.exists(os.path.join(default_loc, f)) for f in tok_files):
+                return default_loc
+    return model_id
+
+
 def load_model_and_tokenizer(
     model_id: str,
     dtype: torch.dtype,
     max_len: int,
 ) -> Tuple[Any, Any, TextStreamer]:
     """Load model, tokenizer, and configure streaming decoder."""
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_id, is_fast=True, truncation=True, max_length=max_len
-    )
+    tokenizer_path = find_tokenizer_path(model_id)
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_path, is_fast=True, truncation=True, max_length=max_len
+        )
+    except Exception:
+        tokenizer = AutoTokenizer.from_pretrained(
+            "google/gemma-3-270m-it", is_fast=True, truncation=True, max_length=max_len
+        )
+
+    # Ensure chat_template is associated with tokenizer or extracted from config.json
+    if getattr(tokenizer, "chat_template", None) is None:
+        chat_template = None
+        if os.path.isdir(model_id):
+            cfg_path = os.path.join(model_id, "config.json")
+            if os.path.exists(cfg_path):
+                try:
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        cfg_dict = json.load(f)
+                    chat_template = cfg_dict.get("chat_template")
+                except Exception:
+                    pass
+        if chat_template is None:
+            from src.dataset import GEMMA_CHAT_TEMPLATE
+
+            chat_template = GEMMA_CHAT_TEMPLATE
+
+        tokenizer.chat_template = chat_template
+
     model = AutoModelForCausalLM.from_pretrained(
         model_id, device_map="auto", dtype=dtype
     ).eval()  # type: ignore[no-untyped-call]

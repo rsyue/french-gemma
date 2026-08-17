@@ -175,3 +175,61 @@ def test_generate_response_cpu_float16_safety() -> None:
         dtype=torch.float16,
     )
     assert mock_model.generate.called
+
+
+def test_find_tokenizer_path(tmp_path) -> None:
+    from inference import find_tokenizer_path
+
+    # Case 1: Tokenizer directly in directory
+    dir1 = tmp_path / "model1"
+    dir1.mkdir()
+    (dir1 / "tokenizer.json").write_text("{}")
+    assert find_tokenizer_path(str(dir1)) == str(dir1)
+
+    # Case 2: Tokenizer in tokenizer_checkpoint subdirectory
+    dir2 = tmp_path / "model2"
+    dir2.mkdir()
+    sub = dir2 / "tokenizer_checkpoint"
+    sub.mkdir()
+    (sub / "tokenizer.json").write_text("{}")
+    assert find_tokenizer_path(str(dir2)) == str(sub)
+
+    # Case 3: Tokenizer in sibling directory
+    parent = tmp_path / "pretrain_run"
+    parent.mkdir()
+    ckpt = parent / "checkpoint-step-100"
+    ckpt.mkdir()
+    sib = parent / "tokenizer_checkpoint"
+    sib.mkdir()
+    (sib / "tokenizer.json").write_text("{}")
+    assert find_tokenizer_path(str(ckpt)) == str(sib)
+
+
+def test_load_model_and_tokenizer_associates_chat_template(tmp_path, monkeypatch) -> None:
+    import json
+    from unittest.mock import MagicMock
+
+    from inference import load_model_and_tokenizer
+    from src.dataset import GEMMA_CHAT_TEMPLATE
+
+    ckpt_dir = tmp_path / "checkpoint-no-template"
+    ckpt_dir.mkdir()
+    (ckpt_dir / "config.json").write_text(json.dumps({"architectures": ["Gemma3ForCausalLM"]}))
+    (ckpt_dir / "tokenizer.json").write_text("{}")
+
+    mock_tokenizer = MagicMock()
+    mock_tokenizer.chat_template = None
+    mock_tokenizer.eos_token_id = 2
+
+    mock_model = MagicMock()
+    mock_model.eval.return_value = mock_model
+    mock_model.generation_config = MagicMock()
+
+    monkeypatch.setattr("transformers.AutoTokenizer.from_pretrained", lambda *args, **kwargs: mock_tokenizer)
+    monkeypatch.setattr("transformers.AutoModelForCausalLM.from_pretrained", lambda *args, **kwargs: mock_model)
+
+    model, tokenizer, streamer = load_model_and_tokenizer(str(ckpt_dir), dtype=torch.float32, max_len=512)
+
+    assert tokenizer.chat_template == GEMMA_CHAT_TEMPLATE
+    assert model == mock_model
+    assert streamer is not None
