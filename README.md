@@ -220,7 +220,7 @@ data_mix:
 ### Turn Format & Loss Masking
 Conversations are tokenized as:
 ```text
-<bos><start_of_turn>user\nBonjour, comment t'appelles-tu ?<end_of_turn>\n<start_of_turn>model\nBonjour, je suis FrenchGemma, un LLM entraîné en français.<end_of_turn>\n
+<bos><start_of_turn>user\nBonjour, tu t'appelles comment ?<end_of_turn>\n<start_of_turn>model\nBonjour, je suis FrenchGemma, un LLM entraîné en français.<end_of_turn>\n
 ```
 Prompt tokens (user and system turns) are automatically assigned a label of `-100`, ensuring cross-entropy optimization gradients are computed strictly over the model response tokens.
 
