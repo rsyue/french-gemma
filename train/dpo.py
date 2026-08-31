@@ -171,6 +171,10 @@ def main() -> None:
         else (torch.float16 if config.amp_dtype == "float16" else torch.float32)
     )
 
+    scaler = None
+    if config.amp_enabled and device_type == "cuda" and amp_dtype == torch.float16:
+        scaler = torch.amp.GradScaler("cuda")  # type: ignore[attr-defined]
+
     policy_model.train()
     step = 0
     accum_loss = 0.0
@@ -257,13 +261,42 @@ def main() -> None:
                     accum_batches = 0
                     continue
 
-                loss_scaled.backward()  # type: ignore[no-untyped-call]
+                if scaler is not None:
+                    scaler.scale(loss_scaled).backward()  # type: ignore[no-untyped-call]
+                else:
+                    loss_scaled.backward()  # type: ignore[no-untyped-call]
+
                 accum_loss += loss.item()
                 accum_batches += 1
 
                 if accum_batches % config.gradient_accumulation_steps == 0:
-                    torch.nn.utils.clip_grad_norm_(policy_model.parameters(), max_norm=1.0)
-                    optimizer.step()
+                    if scaler is not None:
+                        scaler.unscale_(optimizer)
+                        grad_norm = torch.nn.utils.clip_grad_norm_(policy_model.parameters(), max_norm=1.0)
+                        if not torch.isfinite(grad_norm):
+                            logger.warning(
+                                f"Non-finite gradient norm ({grad_norm}) detected at step {step + 1}. "
+                                "Skipping optimizer step."
+                            )
+                            scaler.update()
+                            optimizer.zero_grad(set_to_none=True)
+                            accum_loss = 0.0
+                            accum_batches = 0
+                            continue
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        grad_norm = torch.nn.utils.clip_grad_norm_(policy_model.parameters(), max_norm=1.0)
+                        if not torch.isfinite(grad_norm):
+                            logger.warning(
+                                f"Non-finite gradient norm ({grad_norm}) detected at step {step + 1}. "
+                                "Skipping optimizer step."
+                            )
+                            optimizer.zero_grad(set_to_none=True)
+                            accum_loss = 0.0
+                            accum_batches = 0
+                            continue
+                        optimizer.step()
                     scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
                     step += 1

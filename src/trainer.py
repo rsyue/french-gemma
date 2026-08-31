@@ -239,14 +239,35 @@ class Pretrainer:
             accum_batches_count += 1
 
             # Optimizer step (respecting gradient accumulation steps)
-            if (batch_idx + 1) % self.grad_accum_steps == 0 or (batch_idx + 1) == len(self.train_dataloader):
+            if accum_batches_count % self.grad_accum_steps == 0 or (batch_idx + 1) == len(self.train_dataloader):
                 if self.scaler is not None:
                     self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+                    if not torch.isfinite(grad_norm):
+                        if self.is_main_process:
+                            logger.warning(
+                                f"Non-finite gradient norm ({grad_norm}) detected at step {global_step + 1}. "
+                                "Skipping optimizer step."
+                            )
+                        self.scaler.update()
+                        self.optimizer.zero_grad()
+                        accum_loss = 0.0
+                        accum_batches_count = 0
+                        continue
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                 else:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+                    if not torch.isfinite(grad_norm):
+                        if self.is_main_process:
+                            logger.warning(
+                                f"Non-finite gradient norm ({grad_norm}) detected at step {global_step + 1}. "
+                                "Skipping optimizer step."
+                            )
+                        self.optimizer.zero_grad()
+                        accum_loss = 0.0
+                        accum_batches_count = 0
+                        continue
                     self.optimizer.step()
 
                 self.optimizer.zero_grad()

@@ -93,7 +93,7 @@ def get_batch_logps(
     loss_mask = shift_labels != ignore_index
     clamped_labels = shift_labels.masked_fill(~loss_mask, 0)
 
-    log_probs = shift_logits.log_softmax(dim=-1)
+    log_probs = shift_logits.float().log_softmax(dim=-1)
     per_token_logps = torch.gather(
         log_probs, dim=-1, index=clamped_labels.unsqueeze(-1)
     ).squeeze(-1)
@@ -242,7 +242,7 @@ def batch_format_dpo_pairs(
 
 class DPODataset(Dataset[Dict[str, torch.Tensor]]):
     """
-    PyTorch Dataset for Direct Preference Optimization.
+    PyTorch Dataset for Direct Preference Optimization with prompt masking.
     Supports batched tokenization and formatting with granular progress verbosity.
     """
 
@@ -287,6 +287,12 @@ class DPODataset(Dataset[Dict[str, torch.Tensor]]):
                 )
 
                 for item in formatted_batch:
+                    chosen_active = sum(1 for lbl in item["chosen_labels"][1:] if lbl != -100)
+                    rej_active = sum(1 for lbl in item["rejected_labels"][1:] if lbl != -100)
+                    if chosen_active == 0 or rej_active == 0:
+                        skipped_count += 1
+                        continue
+
                     chosen_ids_t = torch.tensor(item["chosen_input_ids"], dtype=torch.long)
                     chosen_labels_t = torch.tensor(item["chosen_labels"], dtype=torch.long)
 
