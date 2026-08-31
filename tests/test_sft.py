@@ -567,3 +567,69 @@ def test_load_pretrained_checkpoint_errors(tmp_path):
     with pytest.raises(FileNotFoundError):
         model.load_pretrained_checkpoint(empty_dir)
 
+
+def test_sft_strategy_compute_loss_zero_active_response_tokens():
+    """Verify SFTStrategy returns zero finite loss instead of NaN when labels has all -100."""
+    strategy = SFTStrategy()
+
+    class DummyLogitsModel(nn.Module):
+        def forward(self, input_ids, labels=None, attention_mask=None):
+            class Out:
+                logits = torch.randn(2, 4, 10, requires_grad=True)
+                loss = None
+            return Out()
+
+    model = DummyLogitsModel()
+    batch = {
+        "input_ids": torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]]),
+        "labels": torch.tensor([[-100, -100, -100, -100], [-100, -100, -100, -100]]),
+        "attention_mask": torch.tensor([[1, 1, 1, 1], [1, 1, 1, 1]]),
+    }
+
+    loss = strategy.compute_loss(model, batch)
+    assert isinstance(loss, torch.Tensor)
+    assert not torch.isnan(loss), "SFTStrategy computed NaN loss for zero active tokens"
+    assert not torch.isinf(loss), "SFTStrategy computed Inf loss for zero active tokens"
+    assert loss.item() == 0.0
+
+
+def test_french_gemma_model_forward_zero_active_response_tokens():
+    """Verify FrenchGemmaModel.forward returns zero finite loss instead of NaN when labels has all -100."""
+    from src.model import FrenchGemmaModel
+
+    model = FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=256)
+    input_ids = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
+    labels = torch.tensor([[-100, -100, -100, -100]], dtype=torch.long)
+
+    outputs = model(input_ids=input_ids, labels=labels)
+    assert outputs.loss is not None
+    assert not torch.isnan(outputs.loss), "FrenchGemmaModel computed NaN loss for zero active tokens"
+    assert not torch.isinf(outputs.loss), "FrenchGemmaModel computed Inf loss for zero active tokens"
+    assert outputs.loss.item() == 0.0
+
+
+def test_sft_dataset_skips_samples_with_no_shifted_active_tokens(mock_tokenizer):
+    """Verify SFTDataset skips samples where active target tokens exist only at index 0 (which get shifted out)."""
+    # Create mock encoded pair where label at index 0 is non--100, but index 1.. are all -100
+    # In this case, labels[1:] has 0 active tokens.
+    raw_data = [
+        [
+            {"role": "user", "content": "Bonjour"},
+            {"role": "assistant", "content": "Salut"},
+        ]
+    ]
+
+    # Patch batch_format_messages_with_prompt_mask to return a sample where only index 0 is non--100
+    fake_encoded = [([1, 2, 3, 4], [99, -100, -100, -100])]
+    import src.sft_dataset as sft_module
+
+    original_fn = sft_module.batch_format_messages_with_prompt_mask
+    sft_module.batch_format_messages_with_prompt_mask = lambda **kwargs: fake_encoded
+    try:
+        # SFTDataset should reject this sample because labels[1:] has 0 active target tokens
+        with pytest.raises(ValueError, match="0 valid conversational samples"):
+            SFTDataset(conversations=raw_data, tokenizer=mock_tokenizer, max_seq_len=16)
+    finally:
+        sft_module.batch_format_messages_with_prompt_mask = original_fn
+
+

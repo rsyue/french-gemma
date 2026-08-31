@@ -516,7 +516,7 @@ class SFTDataset(Dataset[Dict[str, torch.Tensor]]):
                 )
 
                 for input_ids, labels in encoded_pairs:
-                    active_tokens = sum(1 for lbl in labels if lbl != -100)
+                    active_tokens = sum(1 for lbl in labels[1:] if lbl != -100)
                     if active_tokens == 0:
                         skipped_count += 1
                         continue

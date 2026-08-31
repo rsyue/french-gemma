@@ -273,6 +273,16 @@ def main() -> None:
                     loss = strategy.compute_loss(model, prepared_batch)
                     loss_scaled = loss / config.gradient_accumulation_steps
 
+                if torch.isnan(loss) or torch.isinf(loss):
+                    logger.warning(
+                        f"NaN or Inf SFT loss detected at step {step + 1}. "
+                        "Skipping backward pass and resetting accumulated gradients."
+                    )
+                    optimizer.zero_grad(set_to_none=True)
+                    accum_loss = 0.0
+                    accum_batches = 0
+                    continue
+
                 loss_scaled.backward()  # type: ignore[no-untyped-call]
                 accum_loss += loss.item()
                 accum_batches += 1

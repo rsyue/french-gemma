@@ -218,6 +218,17 @@ class Pretrainer:
                 outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
                 loss = outputs.loss / self.grad_accum_steps
 
+            if torch.isnan(loss) or torch.isinf(loss):
+                if self.is_main_process:
+                    logger.warning(
+                        f"NaN or Inf loss detected at global step {global_step + 1}. "
+                        "Skipping backward pass and resetting accumulated gradients."
+                    )
+                self.optimizer.zero_grad(set_to_none=True)
+                accum_loss = 0.0
+                accum_batches_count = 0
+                continue
+
             # Backward pass
             if self.scaler is not None:
                 self.scaler.scale(loss).backward()
