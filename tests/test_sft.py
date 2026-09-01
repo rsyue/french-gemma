@@ -633,3 +633,36 @@ def test_sft_dataset_skips_samples_with_no_shifted_active_tokens(mock_tokenizer)
         sft_module.batch_format_messages_with_prompt_mask = original_fn
 
 
+def test_sft_checkpoint_dir_saving_with_tokenizer(tmp_path, mock_tokenizer):
+    import os
+
+    from transformers import AutoTokenizer
+
+    from src.dataset import GEMMA_CHAT_TEMPLATE
+    from src.model import FrenchGemmaModel
+
+    out_dir = str(tmp_path / "sft_checkpoints")
+    os.makedirs(out_dir, exist_ok=True)
+    model = FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=len(mock_tokenizer))
+
+    ckpt_path = os.path.join(out_dir, "sft_checkpoint_step_10_loss_1.5000")
+    os.makedirs(ckpt_path, exist_ok=True)
+
+    model.config.architectures = ["Gemma3ForCausalLM"]
+    model.config.save_pretrained(ckpt_path)
+    torch.save(model.state_dict(), os.path.join(ckpt_path, "pytorch_model.bin"))
+
+    if getattr(mock_tokenizer, "chat_template", None) is None:
+        mock_tokenizer.chat_template = GEMMA_CHAT_TEMPLATE
+    mock_tokenizer.save_pretrained(ckpt_path)
+
+    assert os.path.exists(os.path.join(ckpt_path, "config.json"))
+    assert os.path.exists(os.path.join(ckpt_path, "pytorch_model.bin"))
+    assert os.path.exists(os.path.join(ckpt_path, "tokenizer_config.json"))
+
+    tok = AutoTokenizer.from_pretrained(ckpt_path)
+    assert tok.chat_template is not None
+    assert "<start_of_turn>" in tok.chat_template
+
+
+

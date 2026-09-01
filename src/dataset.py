@@ -257,6 +257,8 @@ def load_tokenizer_for_post_training(
             logger.info(f"Loading existing tokenizer from pretrained checkpoint: {pretrained_model_path}")
             if tok.pad_token is None:
                 tok.pad_token = tok.eos_token or "<pad>"
+            if getattr(tok, "chat_template", None) is None:
+                tok.chat_template = GEMMA_CHAT_TEMPLATE
             return tok
         except Exception as err:
             logger.debug(f"Could not load tokenizer directly from {pretrained_model_path}: {err}")
@@ -269,6 +271,8 @@ def load_tokenizer_for_post_training(
                 logger.info(f"Loading existing tokenizer from pretraining cache: {tokenizer_dir}")
                 if tok.pad_token is None:
                     tok.pad_token = tok.eos_token or "<pad>"
+                if getattr(tok, "chat_template", None) is None:
+                    tok.chat_template = GEMMA_CHAT_TEMPLATE
                 return tok
             except Exception as err:
                 logger.debug(f"Could not load tokenizer from {tokenizer_dir}: {err}")
@@ -277,6 +281,8 @@ def load_tokenizer_for_post_training(
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token or "<pad>"
+    if getattr(tokenizer, "chat_template", None) is None:
+        tokenizer.chat_template = GEMMA_CHAT_TEMPLATE
     return tokenizer
 
 

@@ -6,11 +6,14 @@ and configurable generation sampling parameters.
 """
 
 import argparse
+import logging
 import sys
 from typing import Any, List, Optional, Tuple
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextStreamer
+
+logger = logging.getLogger(__name__)
 
 
 def parse_dtype(dtype_str: str) -> torch.dtype:
@@ -124,6 +127,12 @@ def load_model_and_tokenizer(
     tokenizer = AutoTokenizer.from_pretrained(
         model_id, is_fast=True, truncation=True, max_length=max_len
     )
+    if getattr(tokenizer, "chat_template", None) is None:
+        logger.warning(
+            f"Loaded tokenizer from '{model_id}' does not have a chat_template defined. "
+            "Inference will fall back to raw prompt text without turn markers."
+        )
+
     model = AutoModelForCausalLM.from_pretrained(
         model_id, device_map="auto", dtype=dtype
     ).eval()  # type: ignore[no-untyped-call]
@@ -171,6 +180,9 @@ def generate_response(
         )
         inputs = inputs_any.to(device)
     else:
+        logger.warning(
+            "No chat template found on tokenizer. Prompt will be processed as raw text without turn markers."
+        )
         inputs = tokenizer(prompt, return_tensors="pt").to(device)
 
     input_length = inputs.input_ids.shape[1] if hasattr(inputs, "input_ids") else inputs["input_ids"].shape[1]

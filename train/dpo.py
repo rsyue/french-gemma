@@ -187,7 +187,7 @@ def main() -> None:
     def save_if_better(step_idx: int, current_loss: float) -> None:
         if config.max_checkpoints <= 0:
             return
-        checkpoint_name = f"dpo_checkpoint_step_{step_idx}_loss_{current_loss:.4f}.pt"
+        checkpoint_name = f"dpo_checkpoint_step_{step_idx}_loss_{current_loss:.4f}"
         checkpoint_path = os.path.join(config.output_dir, checkpoint_name)
         should_save = False
         if len(best_checkpoints) < config.max_checkpoints:
@@ -199,6 +199,30 @@ def main() -> None:
 
         if should_save:
             tmp_checkpoint_path = f"{checkpoint_path}.tmp"
+            os.makedirs(tmp_checkpoint_path, exist_ok=True)
+
+            raw_model: Any = policy_model
+            while hasattr(raw_model, "_orig_mod") or isinstance(raw_model, torch.nn.parallel.DistributedDataParallel):
+                if hasattr(raw_model, "_orig_mod"):
+                    raw_model = raw_model._orig_mod
+                elif isinstance(raw_model, torch.nn.parallel.DistributedDataParallel):
+                    raw_model = raw_model.module
+
+            if hasattr(raw_model, "config") and raw_model.config is not None:
+                raw_model.config.architectures = ["Gemma3ForCausalLM"]
+                try:
+                    raw_model.config.save_pretrained(tmp_checkpoint_path)
+                except Exception as e:
+                    logger.warning(f"Failed to save Hugging Face config: {e}")
+
+            torch.save(raw_model.state_dict(), os.path.join(tmp_checkpoint_path, "pytorch_model.bin"))
+
+            if tokenizer is not None and hasattr(tokenizer, "save_pretrained"):
+                if getattr(tokenizer, "chat_template", None) is None:
+                    from src.dataset import GEMMA_CHAT_TEMPLATE
+                    tokenizer.chat_template = GEMMA_CHAT_TEMPLATE
+                tokenizer.save_pretrained(tmp_checkpoint_path)
+
             torch.save(
                 {
                     "step": step_idx,
@@ -208,11 +232,18 @@ def main() -> None:
                     "metrics": strategy.latest_metrics,
                     "config": dataclasses.asdict(config),
                 },
-                tmp_checkpoint_path,
+                os.path.join(tmp_checkpoint_path, "training_state.pt"),
             )
+
+            import shutil
+            if os.path.exists(checkpoint_path):
+                if os.path.isdir(checkpoint_path):
+                    shutil.rmtree(checkpoint_path)
+                else:
+                    os.remove(checkpoint_path)
             os.replace(tmp_checkpoint_path, checkpoint_path)
             best_checkpoints.append({"path": checkpoint_path, "loss": current_loss, "step": step_idx})
-            logger.info(f"Saved new best DPO checkpoint (loss={current_loss:.4f}): {checkpoint_path}")
+            logger.info(f"Saved new best DPO checkpoint directory (loss={current_loss:.4f}): {checkpoint_path}")
 
             if len(best_checkpoints) > config.max_checkpoints:
                 worst_to_delete = max(best_checkpoints, key=lambda x: x["loss"])
@@ -221,7 +252,10 @@ def main() -> None:
                 worst_resolved = Path(worst_path).resolve()
                 if worst_resolved.is_relative_to(out_resolved) and os.path.exists(worst_path):
                     try:
-                        os.remove(worst_path)
+                        if os.path.isdir(worst_path):
+                            shutil.rmtree(worst_path)
+                        else:
+                            os.remove(worst_path)
                         logger.info(
                             f"Removed worst DPO checkpoint ({worst_to_delete['loss']:.4f}) to maintain "
                             f"top {config.max_checkpoints}: {worst_path}"

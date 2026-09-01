@@ -175,3 +175,64 @@ def test_generate_response_cpu_float16_safety() -> None:
         dtype=torch.float16,
     )
     assert mock_model.generate.called
+
+
+def test_generate_response_without_chat_template_warns_and_runs(caplog) -> None:
+    import logging
+
+    mock_model = MagicMock()
+    mock_model.device = "cpu"
+    mock_model.generate.return_value = torch.tensor([[1, 2, 3]])
+
+    mock_tokenizer = MagicMock()
+    mock_tokenizer.chat_template = None
+    mock_tokenizer.return_value = MagicMock(
+        input_ids=torch.tensor([[1, 2]]),
+        to=lambda dev: {"input_ids": torch.tensor([[1, 2]])},
+    )
+
+    with caplog.at_level(logging.WARNING):
+        output = generate_response(
+            model=mock_model,
+            tokenizer=mock_tokenizer,
+            prompt="Prompt without template",
+            max_len=128,
+            dtype=torch.float32,
+        )
+
+    assert output is not None
+    assert mock_model.generate.called
+    assert any("No chat template" in record.message for record in caplog.records)
+
+
+def test_inference_loads_checkpoint_directory_with_saved_tokenizer(tmp_path) -> None:
+    import os
+
+    from inference import load_model_and_tokenizer
+    from src.dataset import GEMMA_CHAT_TEMPLATE, train_custom_tokenizer
+    from src.model import FrenchGemmaModel
+
+    ckpt_dir = str(tmp_path / "sft_checkpoint_dir")
+    os.makedirs(ckpt_dir, exist_ok=True)
+
+    # 1. Save dummy model config and weights
+    model = FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=200)
+    model.config.architectures = ["Gemma3ForCausalLM"]
+    model.config.save_pretrained(ckpt_dir)
+    torch.save(model.state_dict(), os.path.join(ckpt_dir, "pytorch_model.bin"))
+
+    # 2. Save tokenizer with chat template
+    tok = train_custom_tokenizer(["Sample text for tokenizer"], vocab_size=200, save_dir=ckpt_dir)
+    assert tok.chat_template == GEMMA_CHAT_TEMPLATE
+
+    # 3. Load via inference load_model_and_tokenizer
+    loaded_model, loaded_tok, streamer = load_model_and_tokenizer(
+        model_id=ckpt_dir,
+        dtype=torch.float32,
+        max_len=512,
+    )
+    assert loaded_model is not None
+    assert loaded_tok is not None
+    assert loaded_tok.chat_template is not None
+    assert "<start_of_turn>" in loaded_tok.chat_template
+
