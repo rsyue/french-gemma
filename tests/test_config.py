@@ -93,6 +93,7 @@ def test_specific_repo_configs():
     assert sft_cfg.save_dir == "./checkpoints/sft"
     assert sft_cfg.output_dir == "./checkpoints/sft"
     assert sft_cfg.pretrained_model_path is None
+    assert sft_cfg.max_grad_norm == 1.0
     assert sft_cfg.data_mix is not None
     assert len(sft_cfg.data_mix) == 3
     assert sft_cfg.data_mix[0].dataset_path == "OpenLLM-France/Luciole-PostTraining-Dataset-1.1"
@@ -107,6 +108,20 @@ def test_specific_repo_configs():
     assert dpo_cfg.save_dir == "./checkpoints/dpo"
     assert dpo_cfg.output_dir == "./checkpoints/dpo"
     assert dpo_cfg.dpo_beta == 0.1
+    assert dpo_cfg.max_grad_norm == 1.0
+
+
+def test_config_max_grad_norm_default_and_alias():
+    cfg_default = TrainingConfig()
+    assert cfg_default.max_grad_norm == 1.0
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config_path = os.path.join(tmpdir, "grad_clip.yaml")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump({"grad_clip_norm": 2.5}, f)
+
+        cfg_alias = TrainingConfig.from_yaml(config_path)
+        assert cfg_alias.max_grad_norm == 2.5
 
 
 def test_config_save_dir_synchronization():

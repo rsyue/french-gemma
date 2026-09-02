@@ -304,9 +304,10 @@ def main() -> None:
                 accum_batches += 1
 
                 if accum_batches % config.gradient_accumulation_steps == 0:
+                    max_grad_norm = getattr(config, "max_grad_norm", 1.0)
                     if scaler is not None:
                         scaler.unscale_(optimizer)
-                        grad_norm = torch.nn.utils.clip_grad_norm_(policy_model.parameters(), max_norm=1.0)
+                        grad_norm = torch.nn.utils.clip_grad_norm_(policy_model.parameters(), max_norm=max_grad_norm)
                         if not torch.isfinite(grad_norm):
                             logger.warning(
                                 f"Non-finite gradient norm ({grad_norm}) detected at step {step + 1}. "
@@ -320,7 +321,7 @@ def main() -> None:
                         scaler.step(optimizer)
                         scaler.update()
                     else:
-                        grad_norm = torch.nn.utils.clip_grad_norm_(policy_model.parameters(), max_norm=1.0)
+                        grad_norm = torch.nn.utils.clip_grad_norm_(policy_model.parameters(), max_norm=max_grad_norm)
                         if not torch.isfinite(grad_norm):
                             logger.warning(
                                 f"Non-finite gradient norm ({grad_norm}) detected at step {step + 1}. "

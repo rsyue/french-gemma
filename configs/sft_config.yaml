@@ -20,6 +20,7 @@ pin_memory: true
 vocab_size: 50000
 dist_timeout_seconds: 7200
 seed: 42
+max_grad_norm: 1.0
 save_dir: "./checkpoints/sft"
 
 data_mix:

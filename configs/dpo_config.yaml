@@ -21,4 +21,5 @@ dist_timeout_seconds: 7200
 seed: 42
 dpo_beta: 0.1
 dpo_label_smoothing: 0.0
+max_grad_norm: 1.0
 save_dir: "./checkpoints/dpo"

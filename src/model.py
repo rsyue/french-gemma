@@ -294,7 +294,7 @@ class FrenchGemmaModel(nn.Module):
             # Loss function with functional cross entropy; return zero loss connected to graph if no valid targets exist
             if (shift_labels != -100).any():
                 loss_t = torch.nn.functional.cross_entropy(
-                    shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1), ignore_index=-100
+                    shift_logits.float().view(-1, shift_logits.size(-1)), shift_labels.view(-1), ignore_index=-100
                 )
                 loss = loss_t.float()  # type: ignore[assignment]
             else:

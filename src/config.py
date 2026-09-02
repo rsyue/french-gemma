@@ -132,6 +132,7 @@ class TrainingConfig:
     seed: int = 42
     dpo_beta: float = 0.1
     dpo_label_smoothing: float = 0.0
+    max_grad_norm: float = 1.0
     ref_model_id: Optional[str] = None
     save_dir: Optional[str] = None
     pretrained_model_path: Optional[str] = None
@@ -160,6 +161,8 @@ class TrainingConfig:
             raise ValueError(
                 f"gradient_accumulation_steps must be >= 1, got {self.gradient_accumulation_steps}"
             )
+        if self.max_grad_norm <= 0:
+            raise ValueError(f"max_grad_norm must be > 0, got {self.max_grad_norm}")
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "TrainingConfig":
@@ -170,6 +173,9 @@ class TrainingConfig:
 
         if not data or not isinstance(data, dict):
             data = {}
+
+        if "grad_clip_norm" in data and ("max_grad_norm" not in data or data["max_grad_norm"] is None):
+            data["max_grad_norm"] = data["grad_clip_norm"]
 
         if "save_dir" in data and ("output_dir" not in data or data["output_dir"] is None):
             data["output_dir"] = data["save_dir"]
