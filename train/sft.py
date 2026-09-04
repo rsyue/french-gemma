@@ -16,7 +16,7 @@ import torch
 
 from src.config import TrainingConfig
 from src.dataset import load_tokenizer_for_post_training
-from src.model import FrenchGemmaModel
+from src.model import FrenchGemmaModel, is_rocm_available
 from src.scheduler import get_cosine_warmup_scheduler
 from src.sft_dataset import (
     DEFAULT_FRENCH_CONVERSATIONS,
@@ -74,6 +74,12 @@ def main() -> None:
         format="[%(asctime)s] %(levelname)s [%(name)s:%(lineno)s] %(message)s",
         level=logging.INFO,
     )
+
+    if is_rocm_available():
+        import warnings
+        warnings.filterwarnings("ignore", message=".*bgemm_internal_cublaslt.*")
+        warnings.filterwarnings("ignore", message=".*HIPBLAS_STATUS_NOT_SUPPORTED.*")
+        logger.info("AMD ROCm GPU hardware detected: filtered hipblasLt unsupported GEMM fallback warnings.")
 
     logger.info(
         f"SFT Training launched. Model: {config.model_id} | Device: {config.device} | "

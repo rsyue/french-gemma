@@ -22,7 +22,7 @@ from src.dpo_dataset import (
     load_dpo_pairs,
     normalize_dpo_pair,
 )
-from src.model import FrenchGemmaModel
+from src.model import FrenchGemmaModel, is_rocm_available
 from src.scheduler import get_cosine_warmup_scheduler
 from train.cli import parse_args_to_config
 from train.strategies.dpo import DPOStrategy
@@ -94,6 +94,12 @@ def main() -> None:
         format="[%(asctime)s] %(levelname)s [%(name)s:%(lineno)s] %(message)s",
         level=logging.INFO,
     )
+
+    if is_rocm_available():
+        import warnings
+        warnings.filterwarnings("ignore", message=".*bgemm_internal_cublaslt.*")
+        warnings.filterwarnings("ignore", message=".*HIPBLAS_STATUS_NOT_SUPPORTED.*")
+        logger.info("AMD ROCm GPU hardware detected: filtered hipblasLt unsupported GEMM fallback warnings.")
 
     logger.info(
         f"DPO Training launched. Model: {config.model_id} | Device: {config.device} | "

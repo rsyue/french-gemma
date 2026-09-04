@@ -8,14 +8,53 @@ supporting optional embedding noise injection (NEFTune style).
 
 import logging
 import os
-from typing import Any, Dict, List, Optional, Union
+import types
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 from transformers import AutoConfig, AutoModel, PreTrainedTokenizerFast
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.modeling_rope_utils import dynamic_rope_update
+from transformers.models.gemma3.modeling_gemma3 import maybe_autocast  # type: ignore[attr-defined]
 
 logger = logging.getLogger(__name__)
+
+
+def is_rocm_available() -> bool:
+    """Checks if PyTorch is running with AMD ROCm/HIP backend support and GPU is available."""
+    return bool(getattr(torch.version, "hip", None) is not None and torch.cuda.is_available())
+
+
+@torch.no_grad()
+@dynamic_rope_update  # type: ignore[untyped-decorator]
+def _amd_safe_rotary_forward(
+    self: Any,
+    x: torch.Tensor,
+    position_ids: torch.Tensor,
+    layer_type: Optional[str] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    AMD ROCm-safe forward implementation for Gemma3RotaryEmbedding.
+    Replaces batched rank-1 matrix multiplication (k=1) with elementwise broadcasting
+    to avoid HIPBLAS_STATUS_NOT_SUPPORTED fallbacks and associated UserWarnings.
+    """
+    inv_freq = getattr(self, f"{layer_type}_inv_freq")
+    attention_scaling = getattr(self, f"{layer_type}_attention_scaling")
+
+    inv_freq_expanded = (
+        inv_freq[None, :, None].expand(position_ids.shape[0], -1, 1).to(dtype=torch.float, device=x.device)
+    )
+    position_ids_expanded = position_ids[:, None, :].float()
+
+    device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
+    with maybe_autocast(device_type=device_type, enabled=False):
+        freqs = (inv_freq_expanded * position_ids_expanded).transpose(1, 2)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos = emb.cos() * attention_scaling
+        sin = emb.sin() * attention_scaling
+
+    return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
 class FrenchGemmaModel(nn.Module):
@@ -55,6 +94,21 @@ class FrenchGemmaModel(nn.Module):
 
         if getattr(self.config, "tie_word_embeddings", True):
             self.lm_head.weight = self.model.embed_tokens.weight
+
+        self.is_rocm_patched: bool = False
+        if is_rocm_available():
+            logger.info(
+                "AMD ROCm GPU hardware detected. Patching Gemma 3 rotary embedding forward pass "
+                "to prevent hipblasLt non-supported GEMM warnings."
+            )
+            self._patch_rocm_rotary_embedding()
+            self.is_rocm_patched = True
+
+    def _patch_rocm_rotary_embedding(self) -> None:
+        """Patches rotary embedding modules to use AMD ROCm safe forward pass."""
+        for module in self.modules():
+            if module.__class__.__name__ == "Gemma3RotaryEmbedding":
+                module.forward = types.MethodType(_amd_safe_rotary_forward, module)
 
     def ensure_tokenizer_vocab_alignment(
         self, tokenizer: Union[int, PreTrainedTokenizerFast, Any]

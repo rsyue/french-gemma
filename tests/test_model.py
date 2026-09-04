@@ -235,3 +235,74 @@ def test_ensure_tokenizer_vocab_alignment_preserves_dtype():
     assert model.lm_head.weight.dtype == torch.float16
 
 
+def test_is_rocm_available_detection(monkeypatch):
+    import src.model as model_mod
+
+    # Simulate ROCm environment: torch.version.hip is string and cuda is available
+    monkeypatch.setattr(torch.version, "hip", "7.13.0", raising=False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert model_mod.is_rocm_available() is True
+
+    # Simulate CUDA environment: torch.version.hip is None
+    monkeypatch.setattr(torch.version, "hip", None, raising=False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert model_mod.is_rocm_available() is False
+
+    # Simulate CPU environment: torch.version.hip is string but cuda is False
+    monkeypatch.setattr(torch.version, "hip", "7.13.0", raising=False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert model_mod.is_rocm_available() is False
+
+
+def test_french_gemma_model_patches_rotary_on_rocm(monkeypatch, caplog):
+    import logging
+
+    import src.model as model_mod
+
+    # Force is_rocm_available to return True
+    monkeypatch.setattr(model_mod, "is_rocm_available", lambda: True)
+
+    with caplog.at_level(logging.INFO):
+        model = model_mod.FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=100)
+
+    assert getattr(model, "is_rocm_patched", False) is True
+    assert "AMD ROCm GPU hardware detected. Patching Gemma 3 rotary embedding forward pass" in caplog.text
+
+
+def test_french_gemma_model_skips_patch_when_not_rocm(monkeypatch, caplog):
+    import logging
+
+    import src.model as model_mod
+
+    # Force is_rocm_available to return False
+    monkeypatch.setattr(model_mod, "is_rocm_available", lambda: False)
+
+    with caplog.at_level(logging.INFO):
+        model = model_mod.FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=100)
+
+    assert getattr(model, "is_rocm_patched", False) is False
+    assert "AMD ROCm GPU hardware detected. Patching Gemma 3 rotary embedding forward pass" not in caplog.text
+
+
+def test_patched_rotary_embedding_numerical_parity(monkeypatch):
+    import src.model as model_mod
+
+    # Unpatched model
+    monkeypatch.setattr(model_mod, "is_rocm_available", lambda: False)
+    unpatched_model = model_mod.FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=100)
+
+    # Patched model
+    monkeypatch.setattr(model_mod, "is_rocm_available", lambda: True)
+    patched_model = model_mod.FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=100)
+
+    x = torch.randn(2, 64, 1152)
+    position_ids = torch.arange(64).unsqueeze(0).expand(2, -1)
+
+    cos_unpatched, sin_unpatched = unpatched_model.model.rotary_emb(x, position_ids, "sliding_attention")
+    cos_patched, sin_patched = patched_model.model.rotary_emb(x, position_ids, "sliding_attention")
+
+    assert torch.allclose(cos_unpatched, cos_patched, atol=1e-6)
+    assert torch.allclose(sin_unpatched, sin_patched, atol=1e-6)
+
+
+

@@ -24,7 +24,7 @@ from src.dataset import (
     train_custom_tokenizer,
     wait_for_data_prep,
 )
-from src.model import FrenchGemmaModel
+from src.model import FrenchGemmaModel, is_rocm_available
 from src.scheduler import FreezeManager, get_cosine_warmup_scheduler
 from src.trainer import Pretrainer
 from train.cli import parse_args_to_config
@@ -56,6 +56,13 @@ def main() -> None:
         format="[%(asctime)s] %(levelname)s [%(name)s:%(lineno)s] %(message)s",
         level=log_level,
     )
+
+    if is_rocm_available():
+        import warnings
+        warnings.filterwarnings("ignore", message=".*bgemm_internal_cublaslt.*")
+        warnings.filterwarnings("ignore", message=".*HIPBLAS_STATUS_NOT_SUPPORTED.*")
+        if rank == 0:
+            logger.info("AMD ROCm GPU hardware detected: filtered hipblasLt unsupported GEMM fallback warnings.")
 
     logger.info(
         f"Pretraining launched. Model: {config.model_id} | Device: {device} | Distributed: {is_distributed}"
