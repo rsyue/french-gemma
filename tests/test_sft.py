@@ -593,6 +593,31 @@ def test_sft_strategy_compute_loss_zero_active_response_tokens():
     assert loss.item() == 0.0
 
 
+def test_sft_strategy_compute_loss_zero_active_tokens_with_infinite_logits():
+    """Verify SFTStrategy returns finite zero loss connected to graph even when logits have inf."""
+    strategy = SFTStrategy()
+
+    class DummyInfLogitsModel(nn.Module):
+        def forward(self, input_ids, labels=None, attention_mask=None):
+            class Out:
+                logits = torch.full((2, 4, 10), float("inf"), requires_grad=True)
+                loss = None
+            return Out()
+
+    model = DummyInfLogitsModel()
+    batch = {
+        "input_ids": torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]]),
+        "labels": torch.tensor([[-100, -100, -100, -100], [-100, -100, -100, -100]]),
+        "attention_mask": torch.tensor([[1, 1, 1, 1], [1, 1, 1, 1]]),
+    }
+
+    loss = strategy.compute_loss(model, batch)
+    assert isinstance(loss, torch.Tensor)
+    assert not torch.isnan(loss), "SFTStrategy computed NaN loss for zero active tokens with inf logits"
+    assert not torch.isinf(loss), "SFTStrategy computed Inf loss for zero active tokens with inf logits"
+    assert loss.item() == 0.0
+
+
 def test_french_gemma_model_forward_zero_active_response_tokens():
     """Verify FrenchGemmaModel.forward returns zero finite loss instead of NaN when labels has all -100."""
     from src.model import FrenchGemmaModel

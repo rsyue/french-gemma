@@ -305,4 +305,66 @@ def test_patched_rotary_embedding_numerical_parity(monkeypatch):
     assert torch.allclose(sin_unpatched, sin_patched, atol=1e-6)
 
 
+def test_diagnose_non_finite_gradients_clean():
+    from src.model import diagnose_non_finite_gradients
+
+    layer = torch.nn.Linear(4, 2)
+    layer.weight.grad = torch.zeros(2, 4)
+    layer.bias.grad = torch.ones(2)
+
+    msg = diagnose_non_finite_gradients(layer)
+    assert "No non-finite gradients detected" in msg
+
+
+def test_diagnose_non_finite_gradients_reports_offending_tensors():
+    from src.model import diagnose_non_finite_gradients
+
+    layer = torch.nn.Linear(4, 2)
+    layer.weight.grad = torch.tensor([[float("nan"), 0.0, 1.0, 2.0], [0.0, float("inf"), 1.0, 2.0]])
+    layer.bias.grad = torch.zeros(2)
+
+    msg = diagnose_non_finite_gradients(layer)
+    assert "'weight'" in msg
+    assert "NaNs=1" in msg
+    assert "Infs=1" in msg
+    assert "'bias'" not in msg
+
+
+def test_french_gemma_model_zero_loss_with_infinite_logits(monkeypatch):
+    import src.model as model_mod
+
+    model = model_mod.FrenchGemmaModel(model_id="google/gemma-3-270m-it", vocab_size=64)
+
+    # Patch lm_head to inject an infinite logit in forward output
+    orig_lm_head = model.lm_head
+
+    class InfHead(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.head = orig_lm_head
+
+        def forward(self, x):
+            res = self.head(x)
+            res.data[0, 0, 0] = float("inf")
+            return res
+
+    monkeypatch.setattr(model, "lm_head", InfHead())
+
+    input_ids = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
+    labels = torch.tensor([[-100, -100, -100, -100]], dtype=torch.long)
+
+    out = model(input_ids=input_ids, labels=labels)
+    assert out.loss is not None
+    assert not torch.isnan(out.loss), "Loss must not be NaN even with infinite logits"
+    assert not torch.isinf(out.loss), "Loss must not be Inf even with infinite logits"
+    assert out.loss.item() == 0.0
+
+    # Ensure backward produces finite zero gradients without error
+    out.loss.backward()
+    for p in model.parameters():
+        if p.grad is not None:
+            assert torch.isfinite(p.grad).all()
+
+
+
 

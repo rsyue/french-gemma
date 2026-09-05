@@ -26,6 +26,31 @@ def is_rocm_available() -> bool:
     return bool(getattr(torch.version, "hip", None) is not None and torch.cuda.is_available())
 
 
+def diagnose_non_finite_gradients(model: nn.Module) -> str:
+    """
+    Inspects model parameters to identify and summarize any non-finite (NaN or Inf) gradients.
+
+    Returns:
+        Human-readable summary string of offending parameters and their gradient anomaly counts,
+        or 'No non-finite gradients detected across parameters' if all gradients are finite.
+    """
+    offending: List[str] = []
+    for name, param in model.named_parameters():
+        if param.grad is not None and not torch.isfinite(param.grad).all():
+            nan_cnt = int(torch.isnan(param.grad).sum().item())
+            inf_cnt = int(torch.isinf(param.grad).sum().item())
+            shape_str = str(list(param.shape))
+            offending.append(f"'{name}' (shape={shape_str}, NaNs={nan_cnt}, Infs={inf_cnt})")
+
+    if not offending:
+        return "No non-finite gradients detected across parameters"
+
+    summary = "; ".join(offending[:5])
+    if len(offending) > 5:
+        summary += f"; ... and {len(offending) - 5} more parameters"
+    return summary
+
+
 @torch.no_grad()
 @dynamic_rope_update  # type: ignore[untyped-decorator]
 def _amd_safe_rotary_forward(
@@ -352,7 +377,7 @@ class FrenchGemmaModel(nn.Module):
                 )
                 loss = loss_t.float()  # type: ignore[assignment]
             else:
-                loss = (shift_logits.sum() * 0.0).float()
+                loss = (shift_logits.reshape(-1)[0].nan_to_num(0.0) * 0.0).float()
 
         return CausalLMOutputWithPast(
             loss=loss, logits=logits, hidden_states=outputs.hidden_states, attentions=outputs.attentions

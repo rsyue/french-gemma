@@ -41,7 +41,7 @@ class SFTStrategy(AbstractTrainingStrategy):
         shift_logits = logits[..., :-1, :].contiguous()
         shift_labels = labels[..., 1:].contiguous()
         if not (shift_labels != -100).any():
-            zero_loss: torch.Tensor = (shift_logits.sum() * 0.0).float()
+            zero_loss: torch.Tensor = (shift_logits.reshape(-1)[0].nan_to_num(0.0) * 0.0).float()
             return zero_loss
         return cross_entropy(
             shift_logits.float().view(-1, shift_logits.size(-1)),

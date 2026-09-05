@@ -487,4 +487,83 @@ def test_cumulative_average_train_loss():
         trainer.close()
 
 
+def test_pretrainer_skips_non_finite_gradients_and_logs_diagnostics(caplog):
+    """Verify Pretrainer skips optimizer step when non-finite gradients occur and logs offending parameter names."""
+    import logging
+
+    class NanGradFn(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, weight):
+            ctx.shape = weight.shape
+            return weight.sum()
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            return torch.full(ctx.shape, float("nan"))
+
+    class NanGradModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.fc = torch.nn.Linear(2, 2)
+
+        def forward(self, input_ids, **kwargs):
+            class Out:
+                pass
+
+            out = Out()
+            out.loss = NanGradFn.apply(self.fc.weight)
+            return out
+
+    class StepCounterOptimizer:
+        def __init__(self, params):
+            self.params = list(params)
+            self.step_called = 0
+            self.param_groups = [{"lr": 1e-4}]
+
+        def step(self):
+            self.step_called += 1
+
+        def zero_grad(self, set_to_none=True):
+            for p in self.params:
+                p.grad = None
+
+    class SingleBatchLoader:
+        def __len__(self):
+            return 1
+
+        def __iter__(self):
+            yield {"input_ids": torch.tensor([[1, 2]])}
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        model = NanGradModel()
+        opt = StepCounterOptimizer(model.parameters())
+        dl = SingleBatchLoader()
+
+        trainer = Pretrainer(
+            model=model,
+            tokenizer=None,
+            train_dataloader=dl,
+            val_dataloader=None,
+            optimizer=opt,
+            lr_scheduler=None,
+            freeze_manager=None,
+            device="cpu",
+            amp_enabled=False,
+            grad_accum_steps=1,
+            log_interval=1,
+            output_dir=tmpdir,
+            tb_log_dir=tmpdir,
+        )
+
+        with caplog.at_level(logging.WARNING):
+            final_step = trainer.train_epoch(epoch=0, global_step=0)
+
+        assert final_step == 0
+        assert opt.step_called == 0
+        assert "Non-finite gradient norm" in caplog.text
+        assert "fc.weight" in caplog.text
+        trainer.close()
+
+
+
 

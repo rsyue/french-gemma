@@ -16,7 +16,7 @@ import torch
 
 from src.config import TrainingConfig
 from src.dataset import load_tokenizer_for_post_training
-from src.model import FrenchGemmaModel, is_rocm_available
+from src.model import FrenchGemmaModel, diagnose_non_finite_gradients, is_rocm_available
 from src.scheduler import get_cosine_warmup_scheduler
 from src.sft_dataset import (
     DEFAULT_FRENCH_CONVERSATIONS,
@@ -341,9 +341,10 @@ def main() -> None:
                         scaler.unscale_(optimizer)
                         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
                         if not torch.isfinite(grad_norm):
+                            diag = diagnose_non_finite_gradients(model)
                             logger.warning(
                                 f"Non-finite gradient norm ({grad_norm}) detected at step {step + 1}. "
-                                "Skipping optimizer step."
+                                f"Offending parameters: {diag}. Skipping optimizer step."
                             )
                             scaler.update()
                             optimizer.zero_grad(set_to_none=True)
@@ -355,9 +356,10 @@ def main() -> None:
                     else:
                         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
                         if not torch.isfinite(grad_norm):
+                            diag = diagnose_non_finite_gradients(model)
                             logger.warning(
                                 f"Non-finite gradient norm ({grad_norm}) detected at step {step + 1}. "
-                                "Skipping optimizer step."
+                                f"Offending parameters: {diag}. Skipping optimizer step."
                             )
                             optimizer.zero_grad(set_to_none=True)
                             accum_loss = 0.0

@@ -21,6 +21,8 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from transformers import PreTrainedTokenizerFast
 
+from src.model import diagnose_non_finite_gradients
+
 logger = logging.getLogger(__name__)
 
 
@@ -245,9 +247,10 @@ class Pretrainer:
                     grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
                     if not torch.isfinite(grad_norm):
                         if self.is_main_process:
+                            diag = diagnose_non_finite_gradients(self.model)
                             logger.warning(
                                 f"Non-finite gradient norm ({grad_norm}) detected at step {global_step + 1}. "
-                                "Skipping optimizer step."
+                                f"Offending parameters: {diag}. Skipping optimizer step."
                             )
                         self.scaler.update()
                         self.optimizer.zero_grad()
@@ -260,9 +263,10 @@ class Pretrainer:
                     grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
                     if not torch.isfinite(grad_norm):
                         if self.is_main_process:
+                            diag = diagnose_non_finite_gradients(self.model)
                             logger.warning(
                                 f"Non-finite gradient norm ({grad_norm}) detected at step {global_step + 1}. "
-                                "Skipping optimizer step."
+                                f"Offending parameters: {diag}. Skipping optimizer step."
                             )
                         self.optimizer.zero_grad()
                         accum_loss = 0.0

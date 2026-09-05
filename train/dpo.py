@@ -22,7 +22,7 @@ from src.dpo_dataset import (
     load_dpo_pairs,
     normalize_dpo_pair,
 )
-from src.model import FrenchGemmaModel, is_rocm_available
+from src.model import FrenchGemmaModel, diagnose_non_finite_gradients, is_rocm_available
 from src.scheduler import get_cosine_warmup_scheduler
 from train.cli import parse_args_to_config
 from train.strategies.dpo import DPOStrategy
@@ -315,9 +315,10 @@ def main() -> None:
                         scaler.unscale_(optimizer)
                         grad_norm = torch.nn.utils.clip_grad_norm_(policy_model.parameters(), max_norm=max_grad_norm)
                         if not torch.isfinite(grad_norm):
+                            diag = diagnose_non_finite_gradients(policy_model)
                             logger.warning(
                                 f"Non-finite gradient norm ({grad_norm}) detected at step {step + 1}. "
-                                "Skipping optimizer step."
+                                f"Offending parameters: {diag}. Skipping optimizer step."
                             )
                             scaler.update()
                             optimizer.zero_grad(set_to_none=True)
@@ -329,9 +330,10 @@ def main() -> None:
                     else:
                         grad_norm = torch.nn.utils.clip_grad_norm_(policy_model.parameters(), max_norm=max_grad_norm)
                         if not torch.isfinite(grad_norm):
+                            diag = diagnose_non_finite_gradients(policy_model)
                             logger.warning(
                                 f"Non-finite gradient norm ({grad_norm}) detected at step {step + 1}. "
-                                "Skipping optimizer step."
+                                f"Offending parameters: {diag}. Skipping optimizer step."
                             )
                             optimizer.zero_grad(set_to_none=True)
                             accum_loss = 0.0
